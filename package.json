@@ -1,0 +1,16 @@
+{
+  "name": "manifest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Manifest — connect data sources, document their meaning, and ask questions with evidence.",
+  "engines": {
+    "node": "^22.18.0 || ^24.11.0"
+  },
+  "scripts": {
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build": "npm --prefix backend run build && npm --prefix frontend run build",
+    "typecheck": "npm --prefix backend run typecheck && npm --prefix frontend run typecheck",
+    "test": "npm --prefix backend run test && npm --prefix frontend run test"
+  }
+}
