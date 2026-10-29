@@ -33,6 +33,25 @@ npm run dev:frontend   # URL printed by Vite, usually http://localhost:5173
 Copy `backend/.env.example` to `backend/.env.local` for local settings. Real environment
 files and credentials are never committed; only `.env.example` files are tracked.
 
+## Application storage
+
+Manifest keeps its own data (workspaces, settings, and later sources and manifests) in a
+PostgreSQL application database, separate from the databases you connect as sources.
+
+```sh
+createdb manifest
+# in backend/.env.local: DATABASE_URL=postgres://USER@localhost:5432/manifest
+npm --prefix backend run db:migrate   # also runs automatically at backend startup
+npm --prefix backend run db:seed      # optional synthetic demo workspace (local only)
+```
+
+Without `DATABASE_URL` the backend still starts, and workspace endpoints return
+`503 STORAGE_NOT_CONFIGURED`. Integration tests need a throwaway database:
+
+```sh
+TEST_DATABASE_URL=postgres://USER@localhost:5432/manifest_test npm --prefix backend run test:integration
+```
+
 ## Verification
 
 ```sh
