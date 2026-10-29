@@ -1,0 +1,72 @@
+import {
+  BookOpenText,
+  ChartColumn,
+  Database,
+  House,
+  MessageCircleQuestion,
+  Save,
+  Settings,
+  Timer,
+} from "lucide-react"
+import { NavLink, Outlet } from "react-router-dom"
+
+import { cn } from "@/shared/lib/cn.ts"
+
+const NAV_ITEMS = [
+  { to: "/", label: "Home", icon: House, end: true },
+  { to: "/ask", label: "Ask", icon: MessageCircleQuestion },
+  { to: "/sources", label: "Sources", icon: Database },
+  { to: "/manifests", label: "Manifests", icon: BookOpenText },
+  { to: "/saved", label: "Saved queries", icon: Save },
+  { to: "/dashboards", label: "Dashboards", icon: ChartColumn },
+  { to: "/routines", label: "Routines", icon: Timer },
+  { to: "/settings", label: "Settings", icon: Settings },
+] as const
+
+function navLinkClass({ isActive }: { isActive: boolean }): string {
+  return cn(
+    "flex shrink-0 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)",
+    isActive
+      ? "bg-(--surface) text-(--foreground)"
+      : "text-(--muted) hover:bg-(--surface) hover:text-(--foreground)",
+  )
+}
+
+export function AppLayout() {
+  return (
+    <div className="flex min-h-dvh flex-col md:flex-row">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-10 focus:rounded-md focus:bg-white focus:px-3 focus:py-2 focus:text-sm"
+      >
+        Skip to content
+      </a>
+      <header className="border-b border-(--border) md:min-h-dvh md:w-60 md:shrink-0 md:border-r md:border-b-0">
+        <div className="px-4 pt-4 md:px-5 md:pt-5">
+          <NavLink to="/" className="text-base font-semibold tracking-tight">
+            Manifest
+          </NavLink>
+          <p className="mt-0.5 hidden text-xs text-(--muted) md:block">
+            Ask your data, with evidence.
+          </p>
+        </div>
+        <nav aria-label="Primary" className="flex gap-1 overflow-x-auto p-3 md:flex-col md:p-3">
+          {NAV_ITEMS.map((item) => (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={"end" in item}
+              className={navLinkClass}
+            >
+              <item.icon aria-hidden className="size-4 shrink-0" />
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+      </header>
+      <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 md:px-8 md:py-8">
+        <Outlet />
+      </main>
+    </div>
+  )
+}

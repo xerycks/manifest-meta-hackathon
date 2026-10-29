@@ -3,10 +3,15 @@
 :root {
   color-scheme: light;
   --background: #ffffff;
+  --surface: #f6f4f1;
   --foreground: #171512;
   --muted: #6f6a61;
   --border: #e4e0d8;
   --accent: #9a3f16;
+  --accent-strong: #7e3311;
+  --danger: #8f1d1d;
+  --danger-surface: #fdf2f2;
+  --danger-border: #f0caca;
 }
 
 body {
