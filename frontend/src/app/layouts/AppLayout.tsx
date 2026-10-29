@@ -10,7 +10,9 @@ import {
 } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 
+import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { cn } from "@/shared/lib/cn.ts"
+import { Select } from "@/shared/ui/fields.tsx"
 
 const NAV_ITEMS = [
   { to: "/", label: "Home", icon: House, end: true },
@@ -33,6 +35,8 @@ function navLinkClass({ isActive }: { isActive: boolean }): string {
 }
 
 export function AppLayout() {
+  const session = useWorkspaceSession()
+
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
       <a
@@ -49,6 +53,25 @@ export function AppLayout() {
           <p className="mt-0.5 hidden text-xs text-(--muted) md:block">
             Ask your data, with evidence.
           </p>
+          {session.workspaces.length > 0 && (
+            <div className="mt-3 hidden md:block">
+              <label htmlFor="layout-workspace-picker" className="text-xs font-medium text-(--muted)">
+                Workspace
+              </label>
+              <Select
+                id="layout-workspace-picker"
+                className="mt-1"
+                value={session.workspaceId ?? ""}
+                onChange={(event) => session.selectWorkspace(event.target.value)}
+              >
+                {session.workspaces.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          )}
         </div>
         <nav aria-label="Primary" className="flex gap-1 overflow-x-auto p-3 md:flex-col md:p-3">
           {NAV_ITEMS.map((item) => (

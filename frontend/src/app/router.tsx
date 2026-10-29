@@ -4,6 +4,7 @@ import { Navigate, Outlet, createBrowserRouter } from "react-router-dom"
 import { HomePage } from "@/pages/home/HomePage.tsx"
 import { NotFoundPage } from "@/pages/not-found/NotFoundPage.tsx"
 import { PlaceholderPage } from "@/pages/placeholder/PlaceholderPage.tsx"
+import { SettingsPage } from "@/pages/settings/SettingsPage.tsx"
 import { ErrorState } from "@/shared/ui/states.tsx"
 
 import { AppLayout } from "./layouts/AppLayout.tsx"
@@ -105,16 +106,7 @@ export const router = createBrowserRouter([
               />
             ),
           },
-          {
-            path: "settings",
-            element: (
-              <PlaceholderPage
-                title="Settings"
-                emptyTitle="Workspace settings"
-                description="Workspace, member, and provider settings will live here."
-              />
-            ),
-          },
+          { path: "settings", element: <SettingsPage /> },
           { path: "home", element: <Navigate to="/" replace /> },
           { path: "*", element: <NotFoundPage /> },
         ],

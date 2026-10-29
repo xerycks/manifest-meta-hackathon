@@ -1,9 +1,11 @@
+import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useHealth } from "@/shared/api/health.ts"
 import { Card, CardDescription, CardTitle } from "@/shared/ui/card.tsx"
 import { ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
 export function HomePage() {
   const health = useHealth()
+  const session = useWorkspaceSession()
 
   return (
     <div className="space-y-6">
@@ -33,8 +35,11 @@ export function HomePage() {
         )}
         {health.isSuccess && (
           <CardDescription>
-            Connected to {health.data.service} (up for {health.data.uptimeSeconds}s). Connect a
-            source when you are ready to build your first manifest.
+            Connected to {health.data.service} (up for {health.data.uptimeSeconds}s, storage{" "}
+            {health.data.storage}).
+            {session.workspace
+              ? ` Current workspace: ${session.workspace.name}.`
+              : " Connect a source when you are ready to build your first manifest."}
           </CardDescription>
         )}
       </Card>

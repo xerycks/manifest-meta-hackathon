@@ -6,6 +6,7 @@ export interface HealthResult {
   status: "ok"
   service: string
   uptimeSeconds: number
+  storage: "configured" | "not-configured"
 }
 
 export function useHealth() {
