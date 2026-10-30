@@ -20,6 +20,8 @@ const skip = !TEST_DATABASE_URL
 let pool: Pool
 let server: Server
 let baseUrl: string
+let cookie = ""
+let csrf = ""
 
 async function startServer(app: Express): Promise<void> {
   await new Promise<void>((resolve) => {
@@ -37,10 +39,17 @@ async function stopServer(): Promise<void> {
 }
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" }
+  if (cookie) headers.Cookie = cookie
+  if (csrf && init.method && init.method !== "GET") headers["X-Manifest-CSRF"] = csrf
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) },
+    headers: { ...headers, ...((init.headers as Record<string, string>) ?? {}) },
   })
+  for (const raw of response.headers.getSetCookie()) {
+    const [pair] = raw.split(";")
+    if (pair?.startsWith("manifest_session=")) cookie = pair
+  }
   return { status: response.status, body: (await response.json()) as T }
 }
 
@@ -48,13 +57,25 @@ before(async () => {
   if (!TEST_DATABASE_URL) return
   pool = createPool(TEST_DATABASE_URL)
   await pool.query(
-    "DROP TABLE IF EXISTS workspace_settings, workspaces, schema_migrations CASCADE",
+    "DROP TABLE IF EXISTS google_login_attempts, sessions, workspace_members, workspace_settings, users, workspaces, schema_migrations CASCADE",
   )
   const applied = await runMigrations(pool)
-  assert.deepEqual(applied, ["0001_workspaces.sql"])
+  assert.deepEqual(applied, ["0001_workspaces.sql", "0002_auth.sql"])
   // Rerunning migrations is a no-op.
   assert.deepEqual(await runMigrations(pool), [])
-  await startServer(createApp(loadEnv({ NODE_ENV: "test" }), { pool }))
+  const env = loadEnv({
+    NODE_ENV: "test",
+    ALLOW_DEV_LOGIN: "true",
+    SESSION_SECRET: "integration-test-secret-at-least-32-chars",
+  })
+  await startServer(createApp(env, { pool }))
+
+  const login = await api<{ result: { csrfToken: string } }>("/api/v1/auth/dev", {
+    method: "POST",
+    body: JSON.stringify({ email: "owner@example.com", name: "Owner" }),
+  })
+  assert.equal(login.status, 200)
+  csrf = login.body.result.csrfToken
 })
 
 after(async () => {

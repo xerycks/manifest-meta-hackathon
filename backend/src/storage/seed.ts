@@ -1,3 +1,4 @@
+import { UsersRepository } from "../auth/repository.js"
 import { loadEnv } from "../config/env.js"
 import { createPool } from "../shared/postgres/client.js"
 import { WorkspacesRepository, WorkspaceSettingsRepository } from "../workspaces/repository.js"
@@ -25,7 +26,15 @@ try {
     existing ?? (await workspaces.create({ slug: "demo", name: "Demo workspace (synthetic)" }))
   await settings.set(demo.id, "description", "Synthetic demo workspace for local development.")
 
-  console.log(`Seeded synthetic workspace "${demo.slug}" (${demo.id}).`)
+  const demoUser = await new UsersRepository(pool).upsertByIdentity({
+    email: "demo@manifest.local",
+    name: "Demo user (synthetic)",
+  })
+  await workspaces.addMember(demo.id, demoUser.id, "owner")
+
+  console.log(
+    `Seeded synthetic workspace "${demo.slug}" (${demo.id}), owned by ${demoUser.email} (dev sign-in).`,
+  )
 } finally {
   await pool.end()
 }

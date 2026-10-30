@@ -2,10 +2,12 @@ export type ErrorCode =
   | "BAD_REQUEST"
   | "VALIDATION_FAILED"
   | "UNAUTHORIZED"
+  | "CSRF_REQUIRED"
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "CONFLICT"
   | "STORAGE_NOT_CONFIGURED"
+  | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
 
 export class AppError extends Error {
@@ -35,6 +37,22 @@ export class AppError extends Error {
 
   static conflict(message: string, details?: unknown): AppError {
     return new AppError(409, "CONFLICT", message, details)
+  }
+
+  static unauthorized(message = "Sign in to continue"): AppError {
+    return new AppError(401, "UNAUTHORIZED", message)
+  }
+
+  static csrf(message = "Refresh the page and try again"): AppError {
+    return new AppError(403, "CSRF_REQUIRED", message)
+  }
+
+  static forbidden(message = "You do not have permission to do this"): AppError {
+    return new AppError(403, "FORBIDDEN", message)
+  }
+
+  static googleUnavailable(): AppError {
+    return new AppError(503, "GOOGLE_SIGN_IN_UNAVAILABLE", "Google sign-in is not configured.")
   }
 
   static storageNotConfigured(): AppError {

@@ -1,6 +1,16 @@
+import { randomBytes } from "node:crypto"
+
 import express, { type Express, type Request, type Response } from "express"
 import type { Pool } from "pg"
 
+import { createGoogleProvider, type GoogleProvider } from "../auth/google.js"
+import {
+  GoogleLoginAttemptsRepository,
+  SessionsRepository,
+  UsersRepository,
+} from "../auth/repository.js"
+import { authRouter, type AuthDeps } from "../auth/routes.js"
+import { AuthService } from "../auth/service.js"
 import type { Env } from "../config/env.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
 import { ok } from "../shared/http/respond.js"
@@ -16,22 +26,48 @@ export interface HealthResult {
 
 export interface AppDeps {
   pool?: Pool | null
-  workspaces?: WorkspaceDeps | null
+  sessionSecret?: string
+  googleProvider?: GoogleProvider | null
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
   const app = express()
   const startedAt = Date.now()
+  const pool = deps.pool ?? null
 
-  const workspaceDeps: WorkspaceDeps | null =
-    deps.workspaces !== undefined
-      ? deps.workspaces
-      : deps.pool
-        ? {
-            workspaces: new WorkspacesRepository(deps.pool),
-            settings: new WorkspaceSettingsRepository(deps.pool),
-          }
-        : null
+  const sessionSecret =
+    deps.sessionSecret ?? env.SESSION_SECRET ?? randomBytes(32).toString("hex")
+
+  let workspaceDeps: WorkspaceDeps | null = null
+  let authDeps: AuthDeps | null = null
+  if (pool) {
+    const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
+    const workspaces = new WorkspacesRepository(pool)
+    const google =
+      deps.googleProvider !== undefined
+        ? deps.googleProvider
+        : env.googleEnabled
+          ? createGoogleProvider({
+              clientId: env.GOOGLE_CLIENT_ID as string,
+              clientSecret: env.GOOGLE_CLIENT_SECRET as string,
+              redirectUri:
+                env.GOOGLE_REDIRECT_URI ?? `http://${env.HOST}:${env.PORT}/api/v1/auth/google/callback`,
+            })
+          : null
+    workspaceDeps = {
+      workspaces,
+      settings: new WorkspaceSettingsRepository(pool),
+      auth,
+      sessionSecret,
+    }
+    authDeps = {
+      auth,
+      attempts: new GoogleLoginAttemptsRepository(pool),
+      workspaces,
+      sessionSecret,
+      google,
+    }
+  }
 
   app.disable("x-powered-by")
   app.use(requestId)
@@ -51,6 +87,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.get("/health", health)
   app.get("/api/health", health)
   app.get("/api/v1/ping", (_req: Request, res: Response) => ok(res, { pong: true }))
+  app.use("/api/v1", authRouter(env, authDeps))
   app.use("/api/v1", workspacesRouter(workspaceDeps))
 
   app.use(notFoundHandler)

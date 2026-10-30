@@ -1,12 +1,15 @@
 import { Router, type NextFunction, type Request, type Response } from "express"
 import { z } from "zod"
 
+import { currentUser, requireAuth, requireCsrf } from "../auth/middleware.js"
+import type { AuthService } from "../auth/service.js"
 import { asyncHandler } from "../shared/http/async-handler.js"
 import { AppError } from "../shared/http/errors.js"
 import { ok } from "../shared/http/respond.js"
 import { validate } from "../shared/http/validate.js"
 import {
   type Workspace,
+  type WorkspaceRole,
   WorkspacesRepository,
   WorkspaceSettingsRepository,
 } from "./repository.js"
@@ -14,12 +17,15 @@ import {
 export interface WorkspaceDeps {
   workspaces: WorkspacesRepository
   settings: WorkspaceSettingsRepository
+  auth: AuthService
+  sessionSecret: string
 }
 
 declare global {
   namespace Express {
     interface Request {
       workspace?: Workspace
+      workspaceRole?: WorkspaceRole
     }
   }
 }
@@ -47,13 +53,24 @@ const settingBodySchema = z.object({
   value: z.unknown(),
 })
 
-function requireWorkspace(deps: WorkspaceDeps) {
+/**
+ * Membership is the workspace boundary: non-members get the same 404 as a
+ * missing workspace, so ids and contents never leak across workspaces.
+ */
+function requireMembership(deps: WorkspaceDeps, roles?: WorkspaceRole[]) {
   return asyncHandler(async (req: Request, _res: Response, next: NextFunction) => {
+    const user = currentUser(req)
     const workspaceId = req.params.workspaceId
     if (!workspaceId) throw AppError.badRequest("Missing workspace id")
+    const role = await deps.workspaces.roleFor(workspaceId, user.id)
+    if (!role) throw AppError.notFound("Workspace not found")
+    if (roles && !roles.includes(role)) {
+      throw AppError.forbidden("Only workspace owners and admins can do this")
+    }
     const workspace = await deps.workspaces.getById(workspaceId)
     if (!workspace) throw AppError.notFound("Workspace not found")
     req.workspace = workspace
+    req.workspaceRole = role
     next()
   })
 }
@@ -71,20 +88,26 @@ export function workspacesRouter(deps: WorkspaceDeps | null): Router {
     return router
   }
 
+  const auth = requireAuth(deps.auth)
+  const csrf = requireCsrf(deps.sessionSecret)
+
   router.get(
     "/workspaces",
-    asyncHandler(async (_req, res) => {
-      ok(res, await deps.workspaces.list())
+    auth,
+    asyncHandler(async (req, res) => {
+      ok(res, await deps.workspaces.listForUser(currentUser(req).id))
     }),
   )
 
   router.post(
     "/workspaces",
+    auth,
+    csrf,
     validate("body", createWorkspaceSchema),
     asyncHandler(async (req, res) => {
       const input = req.body as z.infer<typeof createWorkspaceSchema>
       try {
-        ok(res, await deps.workspaces.create(input), 201)
+        ok(res, await deps.workspaces.createWithOwner(input, currentUser(req).id), 201)
       } catch (error) {
         if (
           typeof error === "object" &&
@@ -101,8 +124,9 @@ export function workspacesRouter(deps: WorkspaceDeps | null): Router {
 
   router.get(
     "/workspaces/:workspaceId/settings",
+    auth,
     validate("params", workspaceParamsSchema),
-    requireWorkspace(deps),
+    requireMembership(deps),
     asyncHandler(async (req, res) => {
       ok(res, await deps.settings.list(currentWorkspace(req).id))
     }),
@@ -110,8 +134,9 @@ export function workspacesRouter(deps: WorkspaceDeps | null): Router {
 
   router.get(
     "/workspaces/:workspaceId/settings/:key",
+    auth,
     validate("params", settingParamsSchema),
-    requireWorkspace(deps),
+    requireMembership(deps),
     asyncHandler(async (req, res) => {
       const key = req.params.key
       if (!key) throw AppError.badRequest("Missing setting key")
@@ -123,9 +148,11 @@ export function workspacesRouter(deps: WorkspaceDeps | null): Router {
 
   router.put(
     "/workspaces/:workspaceId/settings/:key",
+    auth,
+    csrf,
     validate("params", settingParamsSchema),
     validate("body", settingBodySchema),
-    requireWorkspace(deps),
+    requireMembership(deps, ["owner", "admin"]),
     asyncHandler(async (req, res) => {
       const key = req.params.key
       if (!key) throw AppError.badRequest("Missing setting key")

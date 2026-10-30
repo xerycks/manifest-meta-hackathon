@@ -29,7 +29,7 @@ export function cors(env: Env): RequestHandler {
       res.setHeader("Access-Control-Allow-Credentials", "true")
       res.setHeader(
         "Access-Control-Allow-Headers",
-        "Content-Type, X-Workspace-Id, X-Request-Id",
+        "Content-Type, X-Workspace-Id, X-Request-Id, X-Manifest-CSRF",
       )
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
       if (req.method === "OPTIONS") {
