@@ -30,7 +30,10 @@ export function useCreateWorkspace() {
   return useMutation({
     mutationFn: (input: { name: string; slug: string }) =>
       apiRequest<Workspace>("/api/v1/workspaces", { method: "POST", body: input }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["workspaces"] }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["workspaces"] })
+      await queryClient.invalidateQueries({ queryKey: ["context"] })
+    },
   })
 }
 

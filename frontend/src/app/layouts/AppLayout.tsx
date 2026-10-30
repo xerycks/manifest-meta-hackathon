@@ -3,6 +3,7 @@ import {
   ChartColumn,
   Database,
   House,
+  LogOut,
   MessageCircleQuestion,
   Save,
   Settings,
@@ -10,8 +11,11 @@ import {
 } from "lucide-react"
 import { NavLink, Outlet } from "react-router-dom"
 
+import { roleLabels } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
+import { useSessionContext, useSignOut } from "@/shared/api/auth.ts"
 import { cn } from "@/shared/lib/cn.ts"
+import { Button } from "@/shared/ui/button.tsx"
 import { Select } from "@/shared/ui/fields.tsx"
 
 const NAV_ITEMS = [
@@ -36,6 +40,9 @@ function navLinkClass({ isActive }: { isActive: boolean }): string {
 
 export function AppLayout() {
   const session = useWorkspaceSession()
+  const context = useSessionContext()
+  const signOut = useSignOut()
+  const user = context.data?.user
 
   return (
     <div className="flex min-h-dvh flex-col md:flex-row">
@@ -86,6 +93,24 @@ export function AppLayout() {
             </NavLink>
           ))}
         </nav>
+        {user && (
+          <div className="border-t border-(--border) p-4">
+            <p className="truncate text-sm font-medium">{user.name || user.email}</p>
+            <p className="truncate text-xs text-(--muted)">
+              {user.email}
+              {session.workspaceRole ? ` · ${roleLabels[session.workspaceRole]}` : ""}
+            </p>
+            <Button
+              variant="ghost"
+              className="mt-2 px-2"
+              onClick={() => signOut.mutate()}
+              disabled={signOut.isPending}
+            >
+              <LogOut aria-hidden className="size-4" />
+              Sign out
+            </Button>
+          </div>
+        )}
       </header>
       <main id="main" className="mx-auto w-full max-w-5xl flex-1 px-4 py-6 md:px-8 md:py-8">
         <Outlet />

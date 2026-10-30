@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query"
 import { useState, type ReactNode } from "react"
 
+import { SessionGate } from "../session-gate/SessionGate.tsx"
 import { WorkspaceSessionProvider } from "../workspace-session/WorkspaceSession.tsx"
 
 export function AppProviders({ children }: { children: ReactNode }) {
@@ -15,7 +16,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <WorkspaceSessionProvider>{children}</WorkspaceSessionProvider>
+      <SessionGate>
+        <WorkspaceSessionProvider>{children}</WorkspaceSessionProvider>
+      </SessionGate>
     </QueryClientProvider>
   )
 }

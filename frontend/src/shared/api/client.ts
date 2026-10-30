@@ -43,15 +43,38 @@ function apiBaseUrl(): string {
   return configured ? configured.replace(/\/$/, "") : ""
 }
 
+export function buildUrl(path: string): string {
+  return `${apiBaseUrl()}${path}`
+}
+
+let csrfToken: string | null = null
+
+/** Set from the session context; attached to every mutating request. */
+export function setCsrfToken(token: string | null): void {
+  csrfToken = token
+}
+
+export const SESSION_EXPIRED_EVENT = "manifest:session-expired"
+
+function notifySessionExpired(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
+}
+
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  const method = options.method ?? "GET"
   const headers: Record<string, string> = { Accept: "application/json" }
   if (options.body !== undefined) headers["Content-Type"] = "application/json"
   if (options.workspaceId) headers["X-Workspace-Id"] = options.workspaceId
+  if (method !== "GET" && method !== "HEAD" && csrfToken) {
+    headers["X-Manifest-CSRF"] = csrfToken
+  }
 
   let response: Response
   try {
     response = await fetch(`${apiBaseUrl()}${path}`, {
-      method: options.method ?? "GET",
+      method,
       headers,
       credentials: "include",
       ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
@@ -63,6 +86,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
   }
 
   const body: unknown = await response.json().catch(() => null)
+  if (response.status === 401) notifySessionExpired()
   if (!response.ok && (body === null || typeof body !== "object" || !("success" in body))) {
     throw new ApiError(response.status, "HTTP_ERROR", `Request failed (${response.status})`)
   }

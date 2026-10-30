@@ -8,23 +8,25 @@ import {
   type ReactNode,
 } from "react"
 
-import { useWorkspaces, type Workspace } from "@/shared/api/workspaces.ts"
+import type { WorkspaceRole } from "@/app/organization-role.ts"
+import { useSessionContext, type WorkspaceMembership } from "@/shared/api/auth.ts"
 
 const STORAGE_KEY = "manifest.workspaceId"
 
 interface WorkspaceSessionValue {
-  workspaces: Workspace[]
+  workspaces: WorkspaceMembership[]
   isLoading: boolean
   error: Error | null
-  workspace: Workspace | null
+  workspace: WorkspaceMembership | null
   workspaceId: string | null
+  workspaceRole: WorkspaceRole | null
   selectWorkspace: (id: string) => void
 }
 
 const WorkspaceSessionContext = createContext<WorkspaceSessionValue | null>(null)
 
 export function WorkspaceSessionProvider({ children }: { children: ReactNode }) {
-  const query = useWorkspaces()
+  const context = useSessionContext()
   const [selectedId, setSelectedId] = useState<string | null>(() => {
     try {
       return window.localStorage.getItem(STORAGE_KEY)
@@ -33,7 +35,10 @@ export function WorkspaceSessionProvider({ children }: { children: ReactNode }) 
     }
   })
 
-  const workspaces = useMemo(() => query.data ?? [], [query.data])
+  const workspaces = useMemo(
+    () => context.data?.memberships ?? [],
+    [context.data?.memberships],
+  )
 
   useEffect(() => {
     if (workspaces.length === 0) return
@@ -52,17 +57,18 @@ export function WorkspaceSessionProvider({ children }: { children: ReactNode }) 
     }
   }, [])
 
-  const value = useMemo<WorkspaceSessionValue>(
-    () => ({
+  const value = useMemo<WorkspaceSessionValue>(() => {
+    const workspace = workspaces.find((item) => item.id === selectedId) ?? null
+    return {
       workspaces,
-      isLoading: query.isPending,
-      error: query.error instanceof Error ? query.error : null,
-      workspace: workspaces.find((item) => item.id === selectedId) ?? null,
-      workspaceId: selectedId,
+      isLoading: context.isPending,
+      error: context.error instanceof Error ? context.error : null,
+      workspace,
+      workspaceId: workspace?.id ?? null,
+      workspaceRole: workspace?.role ?? null,
       selectWorkspace,
-    }),
-    [workspaces, query.isPending, query.error, selectedId, selectWorkspace],
-  )
+    }
+  }, [workspaces, context.isPending, context.error, selectedId, selectWorkspace])
 
   return (
     <WorkspaceSessionContext.Provider value={value}>{children}</WorkspaceSessionContext.Provider>

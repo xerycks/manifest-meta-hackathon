@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react"
 
+import { managesWorkspace, roleLabels } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { ApiError } from "@/shared/api/client.ts"
 import {
@@ -29,6 +30,7 @@ function errorMessage(error: unknown): string {
 export function SettingsPage() {
   const session = useWorkspaceSession()
   const workspace = session.workspace
+  const canManage = managesWorkspace(session.workspaceRole)
 
   const description = useWorkspaceSetting(session.workspaceId, "description")
   const saveDescription = useSetWorkspaceSetting(session.workspaceId, "description")
@@ -112,6 +114,13 @@ export function SettingsPage() {
               <CardDescription>
                 Stored per workspace. Switch workspaces above and this text changes with it — one
                 workspace never sees another's settings.
+                {session.workspaceRole && (
+                  <>
+                    {" "}
+                    Your role here is {roleLabels[session.workspaceRole]}
+                    {canManage ? "." : " — only owners and admins can change this."}
+                  </>
+                )}
               </CardDescription>
               <form onSubmit={onSaveDescription} className="mt-4 space-y-3">
                 <div className="max-w-lg space-y-1.5">
@@ -121,7 +130,7 @@ export function SettingsPage() {
                     value={descriptionDraft}
                     onChange={(event) => setDescriptionDraft(event.target.value)}
                     placeholder="What is this workspace for?"
-                    disabled={description.isPending}
+                    disabled={description.isPending || !canManage}
                   />
                 </div>
                 {saveDescription.isError && (
@@ -135,7 +144,7 @@ export function SettingsPage() {
                     Saved. It will still be here after a restart.
                   </p>
                 )}
-                <Button type="submit" disabled={saveDescription.isPending}>
+                <Button type="submit" disabled={saveDescription.isPending || !canManage}>
                   {saveDescription.isPending ? "Saving…" : "Save description"}
                 </Button>
               </form>
