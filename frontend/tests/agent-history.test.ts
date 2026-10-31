@@ -329,6 +329,7 @@ test("the conversation list badges what needs attention and lists each conversat
     updatedAt: AT,
     status: "completed",
     pendingClarification: false,
+    routine: null,
   })
   const pages: ConversationPage[] = [
     { conversations: [item("a"), item("b")], nextCursor: "next" },

@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from "lucide-react"
+import { Pencil, Timer, Trash2 } from "lucide-react"
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent } from "react"
 import { Link } from "react-router-dom"
 
@@ -161,6 +161,12 @@ function ConversationItem({
       >
         <span className={cn("block truncate text-sm", current && "font-medium")}>{item.title}</span>
         <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-(--muted)">
+          {item.routine && (
+            <Badge title={`Asked by the routine “${item.routine.name}”`}>
+              <Timer aria-hidden className="size-3" />
+              Routine
+            </Badge>
+          )}
           {badge && <Badge tone={badge.tone}>{badge.label}</Badge>}
           <time dateTime={item.updatedAt}>{formatRelativeTime(item.updatedAt)}</time>
         </span>

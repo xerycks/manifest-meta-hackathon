@@ -14,6 +14,7 @@ import {
 } from "@/entities/saved-queries/parameters.ts"
 import type { SavedQueryDetail } from "@/entities/saved-queries/types.ts"
 import { AddToDashboardButton } from "@/features/dashboard/AddToDashboardButton.tsx"
+import { CreateRoutineLink } from "@/features/manage-routines/RoutineActions.tsx"
 import { RunHistory } from "@/features/saved-query/RunHistory.tsx"
 import { RunPanel } from "@/features/saved-query/RunPanel.tsx"
 import { SavedQueryEditor } from "@/features/saved-query/SavedQueryEditor.tsx"
@@ -271,6 +272,7 @@ function SavedQueryView({ savedQueryId }: { savedQueryId: string }) {
           ))}
           <div className="flex flex-wrap items-center gap-2">
             <AddToDashboardButton workspaceId={session.workspaceId} savedQuery={data} />
+            <CreateRoutineLink savedQueryId={data.id} />
             {canChange ? (
               <>
                 <Button

@@ -187,6 +187,8 @@ export interface ConversationSummary extends Conversation {
   status: RunStatus | null
   /** The latest question waits for the user's answer. */
   pendingClarification: boolean
+  /** The routine that asks its questions here, while it exists. */
+  routine: { id: string; name: string } | null
 }
 
 /** GET …/agent/conversations?limit=&cursor=: newest activity first. */
