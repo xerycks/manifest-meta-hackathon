@@ -2,19 +2,22 @@ export class ApiError extends Error {
   readonly status: number
   readonly code: string
   readonly requestId: string | undefined
+  /** Machine-readable extras from the backend, e.g. validation issues or a failure reason. */
+  readonly details: unknown
 
-  constructor(status: number, code: string, message: string, requestId?: string) {
+  constructor(status: number, code: string, message: string, requestId?: string, details?: unknown) {
     super(message)
     this.name = "ApiError"
     this.status = status
     this.code = code
     this.requestId = requestId
+    this.details = details
   }
 }
 
 interface ErrorEnvelope {
   success: false
-  error?: { code?: string; message?: string; requestId?: string }
+  error?: { code?: string; message?: string; requestId?: string; details?: unknown }
 }
 
 export function unwrapEnvelope<T>(status: number, body: unknown): T {
@@ -26,6 +29,7 @@ export function unwrapEnvelope<T>(status: number, body: unknown): T {
       envelope.error?.code ?? "UNKNOWN_ERROR",
       envelope.error?.message ?? "Request failed",
       envelope.error?.requestId,
+      envelope.error?.details,
     )
   }
   throw new ApiError(status, "INVALID_RESPONSE", "The server returned an unexpected response")

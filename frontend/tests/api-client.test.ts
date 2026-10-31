@@ -20,6 +20,22 @@ test("unwrapEnvelope throws an ApiError with the stable backend code", () => {
       assert.equal(error.code, "NOT_FOUND")
       assert.equal(error.status, 404)
       assert.equal(error.requestId, "req-1")
+      assert.equal(error.details, undefined)
+      return true
+    },
+  )
+})
+
+test("unwrapEnvelope keeps error details such as a failure reason", () => {
+  assert.throws(
+    () =>
+      unwrapEnvelope(422, {
+        success: false,
+        error: { code: "SOURCE_CONNECTION_FAILED", message: "No", details: { reason: "timeout" } },
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof ApiError)
+      assert.deepEqual(error.details, { reason: "timeout" })
       return true
     },
   )

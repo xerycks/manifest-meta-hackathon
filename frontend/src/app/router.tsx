@@ -5,6 +5,9 @@ import { HomePage } from "@/pages/home/HomePage.tsx"
 import { NotFoundPage } from "@/pages/not-found/NotFoundPage.tsx"
 import { PlaceholderPage } from "@/pages/placeholder/PlaceholderPage.tsx"
 import { SettingsPage } from "@/pages/settings/SettingsPage.tsx"
+import { EditSourcePage } from "@/pages/sources/EditSourcePage.tsx"
+import { NewSourcePage } from "@/pages/sources/NewSourcePage.tsx"
+import { SourcesPage } from "@/pages/sources/SourcesPage.tsx"
 import { ErrorState } from "@/shared/ui/states.tsx"
 
 import { AppLayout } from "./layouts/AppLayout.tsx"
@@ -56,16 +59,9 @@ export const router = createBrowserRouter([
               />
             ),
           },
-          {
-            path: "sources",
-            element: (
-              <PlaceholderPage
-                title="Sources"
-                emptyTitle="No sources connected"
-                description="Connect a PostgreSQL or MongoDB database. Manifest reads its schema only — your saved credentials stay encrypted on the server."
-              />
-            ),
-          },
+          { path: "sources", element: <SourcesPage /> },
+          { path: "sources/new", element: <NewSourcePage /> },
+          { path: "sources/:connectionId", element: <EditSourcePage /> },
           {
             path: "manifests",
             element: (

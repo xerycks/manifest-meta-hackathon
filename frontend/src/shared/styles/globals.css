@@ -10,8 +10,12 @@
   --accent: #9a3f16;
   --accent-strong: #7e3311;
   --danger: #8f1d1d;
+  --danger-strong: #741515;
   --danger-surface: #fdf2f2;
   --danger-border: #f0caca;
+  --success: #1d6b3a;
+  --success-surface: #effaf2;
+  --success-border: #c3e6cf;
 }
 
 body {

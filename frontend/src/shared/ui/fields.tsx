@@ -13,6 +13,19 @@ export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectE
   return <select className={cn(fieldClass, className)} {...props} />
 }
 
+export function Checkbox({ className, ...props }: Omit<InputHTMLAttributes<HTMLInputElement>, "type">) {
+  return (
+    <input
+      type="checkbox"
+      className={cn(
+        "size-4 shrink-0 accent-(--accent) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent) disabled:opacity-50",
+        className,
+      )}
+      {...props}
+    />
+  )
+}
+
 export function Label({ className, ...props }: LabelHTMLAttributes<HTMLLabelElement>) {
   return <label className={cn("text-sm font-medium", className)} {...props} />
 }
