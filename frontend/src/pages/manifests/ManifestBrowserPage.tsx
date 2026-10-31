@@ -1,41 +1,61 @@
 import { ArrowLeft } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Link, useParams } from "react-router-dom"
 
 import { managesWorkspace } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useConnection } from "@/entities/connections/api.ts"
 import { useLatestRefresh, useManifest, useManifestObject } from "@/entities/manifests/api.ts"
+import { columnAnchor } from "@/entities/manifests/links.ts"
 import { isRefreshActive } from "@/entities/manifests/refresh-state.ts"
 import { errorMessage, isNotFound } from "@/features/browse-manifest/manifest-view.ts"
 import { ObjectDetail } from "@/features/browse-manifest/ObjectDetail.tsx"
 import { ObjectList } from "@/features/browse-manifest/ObjectList.tsx"
+import { ColumnMeaningEditor, ColumnMeaningSummary } from "@/features/edit-manifests/ColumnMeaning.tsx"
+import { ObjectMeaning } from "@/features/edit-manifests/ObjectMeaning.tsx"
+import { RelationshipsSection } from "@/features/edit-manifests/RelationshipsSection.tsx"
 import { RefreshPanel } from "@/features/refresh-manifest/RefreshPanel.tsx"
 import { cn } from "@/shared/lib/cn.ts"
 import { useDebouncedValue } from "@/shared/lib/use-debounced-value.ts"
+import { Button } from "@/shared/ui/button.tsx"
+import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
 import { EmptyState, ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
-/** Detail pane for the object in the URL. */
+/** Detail pane for the object in the URL, with inline editors for owners and admins. */
 function ObjectPane({
   workspaceId,
   connectionId,
   objectId,
+  canEdit,
 }: {
   workspaceId: string
   connectionId: string
   objectId: string
+  canEdit: boolean
 }) {
   const object = useManifestObject(workspaceId, connectionId, objectId)
+  const [editingColumnId, setEditingColumnId] = useState<string | null>(null)
+  const returnFocusTo = useRef<string | null>(null)
+  const editingColumn = object.data?.columns.find((column) => column.id === editingColumnId) ?? null
+
+  useEffect(() => {
+    // A closed column editor hands focus back to its column's row.
+    if (editingColumnId !== null || !returnFocusTo.current) return
+    document.getElementById(columnAnchor(returnFocusTo.current))?.focus()
+    returnFocusTo.current = null
+  }, [editingColumnId])
+
   if (object.isPending) return <LoadingState label="Loading table…" />
-  if (isNotFound(object.error)) {
-    return (
-      <EmptyState
-        title="Not in this manifest"
-        description="This table or view does not belong to this source. Choose one from the list."
-      />
-    )
-  }
-  if (object.isError) {
+  const detail = object.data
+  if (!detail) {
+    if (isNotFound(object.error)) {
+      return (
+        <EmptyState
+          title="Not in this manifest"
+          description="This table or view does not belong to this source. Choose one from the list."
+        />
+      )
+    }
     return (
       <ErrorState
         title="Table unavailable"
@@ -44,7 +64,60 @@ function ObjectPane({
       />
     )
   }
-  return <ObjectDetail connectionId={connectionId} detail={object.data} />
+  // A failed reload (e.g. after a failed save) keeps the loaded detail and any open editor.
+  return (
+    <div className="space-y-4">
+      {object.isError && (
+        <FailureNotice title="Could not reload this table" message={errorMessage(object.error)}>
+          <Button variant="secondary" className="mt-2 px-2.5 py-1 text-xs" onClick={() => void object.refetch()}>
+            Try again
+          </Button>
+        </FailureNotice>
+      )}
+      <ObjectDetail
+        connectionId={connectionId}
+        detail={detail}
+        meaning={
+          <ObjectMeaning
+            workspaceId={workspaceId}
+            connectionId={connectionId}
+            object={detail.object}
+            canEdit={canEdit}
+          />
+        }
+        relationships={
+          <RelationshipsSection
+            workspaceId={workspaceId}
+            connectionId={connectionId}
+            detail={detail}
+            canEdit={canEdit}
+          />
+        }
+        renderColumnMeaning={(column) => (
+          <ColumnMeaningSummary
+            column={column}
+            canEdit={canEdit}
+            editorOpen={editingColumnId !== null}
+            onEdit={() => setEditingColumnId(column.id)}
+          />
+        )}
+        columnEditor={
+          editingColumn && (
+            <ColumnMeaningEditor
+              key={editingColumn.id}
+              workspaceId={workspaceId}
+              connectionId={connectionId}
+              column={editingColumn}
+              onClose={() => {
+                returnFocusTo.current = editingColumn.id
+                setEditingColumnId(null)
+              }}
+            />
+          )
+        }
+      />
+    </div>
+  )
 }
 
 /**
@@ -171,6 +244,7 @@ function ManifestBrowser({
                     workspaceId={workspaceId}
                     connectionId={connectionId}
                     objectId={objectId}
+                    canEdit={canManage}
                   />
                 ) : (
                   <p className="rounded-lg border border-dashed border-(--border) px-6 py-12 text-center text-sm text-(--muted)">

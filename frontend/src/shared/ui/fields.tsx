@@ -1,12 +1,23 @@
-import type { InputHTMLAttributes, LabelHTMLAttributes, SelectHTMLAttributes } from "react"
+import type {
+  ComponentProps,
+  InputHTMLAttributes,
+  LabelHTMLAttributes,
+  SelectHTMLAttributes,
+  TextareaHTMLAttributes,
+} from "react"
 
 import { cn } from "../lib/cn.ts"
 
 const fieldClass =
   "w-full rounded-md border border-(--border) bg-white px-3 py-2 text-sm text-(--foreground) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent) disabled:opacity-50"
 
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+/** Accepts a ref like a plain input (React 19 passes it as a prop). */
+export function Input({ className, ...props }: ComponentProps<"input">) {
   return <input className={cn(fieldClass, className)} {...props} />
+}
+
+export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+  return <textarea className={cn(fieldClass, "min-h-20 leading-6", className)} {...props} />
 }
 
 export function Select({ className, ...props }: SelectHTMLAttributes<HTMLSelectElement>) {

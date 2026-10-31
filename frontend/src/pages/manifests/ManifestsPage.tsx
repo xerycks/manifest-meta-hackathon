@@ -1,14 +1,19 @@
-import { ChevronRight, Database } from "lucide-react"
+import { BookMarked, ChevronRight, Database } from "lucide-react"
 import { Link } from "react-router-dom"
 
 import { managesWorkspace } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useConnections } from "@/entities/connections/api.ts"
+import { KNOWLEDGE_HREF } from "@/entities/knowledge/links.ts"
 import { errorMessage } from "@/features/browse-manifest/manifest-view.ts"
+import { ManifestSearch } from "@/features/search-manifests/ManifestSearch.tsx"
 import { buttonVariants } from "@/shared/ui/button.tsx"
 import { EmptyState, ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
-/** Choose a source to browse its discovered schemas, tables, and columns. */
+/**
+ * Search across every source and the knowledge base, or choose a source to
+ * browse and document its schemas, tables, and columns.
+ */
 export function ManifestsPage() {
   const session = useWorkspaceSession()
   const connections = useConnections(session.workspaceId)
@@ -16,13 +21,21 @@ export function ManifestsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="max-w-2xl">
-        <h1 className="text-2xl font-semibold tracking-tight">Manifests</h1>
-        <p className="mt-1 leading-7 text-(--muted)">
-          The tables, views, columns, and relationships Manifest discovered in each source. Choose a
-          source to browse it.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="max-w-2xl">
+          <h1 className="text-2xl font-semibold tracking-tight">Manifests</h1>
+          <p className="mt-1 leading-7 text-(--muted)">
+            The tables, views, columns, and relationships in each source, and what they mean. Choose a
+            source to browse and describe it.
+          </p>
+        </div>
+        <Link to={KNOWLEDGE_HREF} className={buttonVariants({ variant: "secondary" })}>
+          <BookMarked aria-hidden className="size-4" />
+          Knowledge base
+        </Link>
       </div>
+
+      <ManifestSearch workspaceId={session.workspaceId} />
 
       {(!session.workspaceId || connections.isPending) && (
         <LoadingState label="Loading sources…" />

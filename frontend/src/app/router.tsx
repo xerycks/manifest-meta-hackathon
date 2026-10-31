@@ -2,6 +2,9 @@ import { Component, type ReactNode } from "react"
 import { Navigate, Outlet, createBrowserRouter } from "react-router-dom"
 
 import { HomePage } from "@/pages/home/HomePage.tsx"
+import { KnowledgeEntryPage } from "@/pages/knowledge/KnowledgeEntryPage.tsx"
+import { KnowledgePage } from "@/pages/knowledge/KnowledgePage.tsx"
+import { NewKnowledgeEntryPage } from "@/pages/knowledge/NewKnowledgeEntryPage.tsx"
 import { ManifestBrowserPage } from "@/pages/manifests/ManifestBrowserPage.tsx"
 import { ManifestsPage } from "@/pages/manifests/ManifestsPage.tsx"
 import { NotFoundPage } from "@/pages/not-found/NotFoundPage.tsx"
@@ -65,6 +68,9 @@ export const router = createBrowserRouter([
           { path: "sources/new", element: <NewSourcePage /> },
           { path: "sources/:connectionId", element: <EditSourcePage /> },
           { path: "manifests", element: <ManifestsPage /> },
+          { path: "manifests/knowledge", element: <KnowledgePage /> },
+          { path: "manifests/knowledge/new", element: <NewKnowledgeEntryPage /> },
+          { path: "manifests/knowledge/:entryId", element: <KnowledgeEntryPage /> },
           { path: "manifests/:connectionId", element: <ManifestBrowserPage /> },
           { path: "manifests/:connectionId/objects/:objectId", element: <ManifestBrowserPage /> },
           {

@@ -51,7 +51,7 @@ export function ObjectList({
             className="pl-8"
             value={search}
             maxLength={100}
-            placeholder="Name contains…"
+            placeholder="Name or label contains…"
             onChange={(event) => onSearchChange(event.target.value)}
           />
         </div>
@@ -81,10 +81,17 @@ export function ObjectList({
                     to={`/manifests/${connectionId}/objects/${object.id}`}
                     className={objectLinkClass}
                   >
-                    <span
-                      className={cn("min-w-0 truncate", !object.present && "text-(--muted) line-through")}
-                    >
-                      {object.name}
+                    <span className="min-w-0">
+                      <span
+                        className={cn("block truncate", !object.present && "text-(--muted) line-through")}
+                      >
+                        {object.name}
+                      </span>
+                      {object.label && (
+                        <span className="block truncate text-xs font-normal text-(--muted)">
+                          {object.label}
+                        </span>
+                      )}
                     </span>
                     <span className="flex shrink-0 items-center gap-1.5 text-xs text-(--muted)">
                       {!object.present ? (
