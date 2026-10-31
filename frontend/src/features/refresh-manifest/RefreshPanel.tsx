@@ -5,6 +5,7 @@ import {
   useLatestRefresh,
   useStartRefresh,
 } from "@/entities/manifests/api.ts"
+import type { ConnectionEngine } from "@/entities/connections/types.ts"
 import { isRefreshActive } from "@/entities/manifests/refresh-state.ts"
 import type { ManifestRefresh } from "@/entities/manifests/types.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
@@ -42,11 +43,13 @@ function StillShowing({ lastPublished }: { lastPublished: ManifestRefresh | null
 export function RefreshPanel({
   workspaceId,
   connectionId,
+  engine,
   canManage,
   lastPublished,
 }: {
   workspaceId: string
   connectionId: string
+  engine: ConnectionEngine
   canManage: boolean
   lastPublished: ManifestRefresh | null
 }) {
@@ -55,10 +58,10 @@ export function RefreshPanel({
   const cancel = useCancelRefresh(workspaceId, connectionId)
   const refresh = latest.data ?? null
   const active = isRefreshActive(refresh)
-  const progress = refresh && active ? refreshProgress(refresh) : null
+  const progress = refresh && active ? refreshProgress(refresh, engine) : null
   const actionError = start.error ?? cancel.error
   const counts = lastPublished?.counts ?? null
-  const changes = counts ? describeChanges(counts) : null
+  const changes = counts ? describeChanges(counts, engine) : null
 
   return (
     <Card className="space-y-3">
@@ -90,7 +93,7 @@ export function RefreshPanel({
               </p>
               {counts && (
                 <p className="mt-1 text-(--muted)">
-                  {describeCounts(counts)}
+                  {describeCounts(counts, engine)}
                   {changes && ` · ${changes}`}
                 </p>
               )}

@@ -77,6 +77,7 @@ function RelationshipList({
   direction,
   workspaceId,
   connectionId,
+  mongo,
   canEdit,
   onEdit,
 }: {
@@ -86,6 +87,8 @@ function RelationshipList({
   direction: "outgoing" | "incoming"
   workspaceId: string
   connectionId: string
+  /** MongoDB sources have collections and fields. */
+  mongo: boolean
   canEdit: boolean
   onEdit: (relationship: ManifestRelationship) => void
 }) {
@@ -127,8 +130,10 @@ function RelationshipList({
                 )}
                 {relationship.needsReview && (
                   <p className="mt-1 text-xs leading-5 text-(--danger)">
-                    A table or column it uses is no longer in the source.
-                    {canEdit && " Choose other columns or remove it."}
+                    {mongo
+                      ? "A collection or field it uses was not found by the latest refresh."
+                      : "A table or column it uses is no longer in the source."}
+                    {canEdit && ` Choose other ${mongo ? "fields" : "columns"} or remove it.`}
                   </p>
                 )}
                 {canEdit && (
@@ -180,6 +185,7 @@ export function RelationshipsSection({
   const listProps = {
     workspaceId,
     connectionId,
+    mongo: detail.object.details?.engine === "mongodb",
     // One form at a time, so opening another never drops a draft.
     canEdit: canEdit && form === null,
     onEdit: (relationship: ManifestRelationship) => setForm({ relationship }),

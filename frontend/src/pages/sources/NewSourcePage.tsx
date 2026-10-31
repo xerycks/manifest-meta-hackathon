@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom"
 
 import { managesWorkspace } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
+import { ENGINE_TERMS } from "@/entities/connections/engine.ts"
 import { ConnectionForm } from "@/features/manage-connections/ConnectionForm.tsx"
 import { EmptyState, LoadingState } from "@/shared/ui/states.tsx"
 
@@ -20,9 +21,10 @@ export function NewSourcePage() {
           <ArrowLeft aria-hidden className="size-4" />
           Sources
         </Link>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Add a PostgreSQL source</h1>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Add a source</h1>
         <p className="mt-1 max-w-2xl leading-7 text-(--muted)">
-          Enter the connection settings, test them, then choose which schemas Manifest may read.
+          Connect PostgreSQL or MongoDB: enter the connection settings, test them, then choose which
+          schemas or databases Manifest may read.
         </p>
       </div>
 
@@ -40,7 +42,7 @@ export function NewSourcePage() {
           onSaved={(connection) =>
             navigate("/sources", {
               state: {
-                notice: `Saved “${connection.name}”. Manifest is discovering its tables and columns now.`,
+                notice: `Saved “${connection.name}”. Manifest is discovering its ${ENGINE_TERMS[connection.engine].objects} now.`,
               },
             })
           }

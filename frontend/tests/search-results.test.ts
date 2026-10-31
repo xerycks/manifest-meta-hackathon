@@ -66,7 +66,7 @@ test("tables come first and nothing found means no first result", () => {
       },
     ],
   })
-  assert.equal(groups[0]?.label, "Tables and views")
+  assert.equal(groups[0]?.label, "Tables, views, and collections")
   assert.equal(groups[0]?.items[0]?.context, "Store")
   assert.equal(groups[0]?.items[0]?.matched, "row meaning")
   assert.equal(firstResultHref(groups), "/manifests/c1/objects/o2")

@@ -39,8 +39,8 @@ export function SourcesPage() {
             Sources
           </h1>
           <p className="mt-1 leading-7 text-(--muted)">
-            Databases this workspace analyses. Passwords are encrypted on the server and never shown
-            again.
+            PostgreSQL and MongoDB databases this workspace analyses. Passwords and connection strings
+            are encrypted on the server and never shown again.
             {session.workspaceRole && !canManage && " Owners and admins add, edit, and remove sources."}
           </p>
         </div>
@@ -66,7 +66,7 @@ export function SourcesPage() {
           title="No sources connected"
           description={
             canManage
-              ? "Connect a PostgreSQL database to start documenting and asking questions about it."
+              ? "Connect a PostgreSQL or MongoDB database to start documenting and asking questions about it."
               : "No one has connected a source to this workspace yet. Ask an owner or admin to add one."
           }
           action={addSource || undefined}

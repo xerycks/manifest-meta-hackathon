@@ -36,7 +36,8 @@ export function EditSourcePage() {
         </h1>
         {canManage && (
           <p className="mt-1 max-w-2xl leading-7 text-(--muted)">
-            Changes to the connection settings or schemas are tested before they are saved.
+            Changes to the connection settings, schemas, or databases are tested before they are
+            saved.
           </p>
         )}
       </div>

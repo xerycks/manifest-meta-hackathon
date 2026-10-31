@@ -5,6 +5,8 @@ import { Link, useParams } from "react-router-dom"
 import { managesWorkspace } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useConnection } from "@/entities/connections/api.ts"
+import { ENGINE_LABELS, ENGINE_TERMS, type EngineTerms } from "@/entities/connections/engine.ts"
+import { EngineIcon } from "@/entities/connections/EngineIcon.tsx"
 import { useLatestRefresh, useManifest, useManifestObject } from "@/entities/manifests/api.ts"
 import { columnAnchor } from "@/entities/manifests/links.ts"
 import { isRefreshActive } from "@/entities/manifests/refresh-state.ts"
@@ -26,11 +28,13 @@ function ObjectPane({
   workspaceId,
   connectionId,
   objectId,
+  terms,
   canEdit,
 }: {
   workspaceId: string
   connectionId: string
   objectId: string
+  terms: EngineTerms
   canEdit: boolean
 }) {
   const object = useManifestObject(workspaceId, connectionId, objectId)
@@ -45,20 +49,20 @@ function ObjectPane({
     returnFocusTo.current = null
   }, [editingColumnId])
 
-  if (object.isPending) return <LoadingState label="Loading table…" />
+  if (object.isPending) return <LoadingState label={`Loading ${terms.object}…`} />
   const detail = object.data
   if (!detail) {
     if (isNotFound(object.error)) {
       return (
         <EmptyState
           title="Not in this manifest"
-          description="This table or view does not belong to this source. Choose one from the list."
+          description={`This ${terms.object} does not belong to this source. Choose one from the list.`}
         />
       )
     }
     return (
       <ErrorState
-        title="Table unavailable"
+        title="Details unavailable"
         message={errorMessage(object.error)}
         onRetry={() => void object.refetch()}
       />
@@ -68,7 +72,7 @@ function ObjectPane({
   return (
     <div className="space-y-4">
       {object.isError && (
-        <FailureNotice title="Could not reload this table" message={errorMessage(object.error)}>
+        <FailureNotice title="Could not reload these details" message={errorMessage(object.error)}>
           <Button variant="secondary" className="mt-2 px-2.5 py-1 text-xs" onClick={() => void object.refetch()}>
             Try again
           </Button>
@@ -145,6 +149,8 @@ function ManifestBrowser({
   const search = useDebouncedValue(searchInput.trim(), 250)
 
   const connection = useConnection(workspaceId, connectionId)
+  const engine = connection.data?.engine ?? "postgres"
+  const terms = ENGINE_TERMS[engine]
   const manifest = useManifest(workspaceId, connectionId, search)
   const latest = useLatestRefresh(workspaceId, connectionId)
   const sourceMissing = isNotFound(connection.error)
@@ -169,9 +175,15 @@ function ManifestBrowser({
           {connection.data?.name ?? "Manifest"}
         </h1>
         {connection.data && (
-          <p className="mt-1 text-sm break-words text-(--muted)">
-            Database {connection.data.config.database} · schemas{" "}
-            {connection.data.schemas.join(", ")}
+          <p className="mt-1 flex items-start gap-1.5 text-sm text-(--muted)">
+            <EngineIcon engine={engine} className="mt-0.5" />
+            <span className="min-w-0 break-words">
+              {ENGINE_LABELS[engine]} ·{" "}
+              {connection.data.engine === "postgres"
+                ? `database ${connection.data.config.database} · schemas `
+                : "databases "}
+              {connection.data.schemas.join(", ")}
+            </span>
           </p>
         )}
       </div>
@@ -201,6 +213,7 @@ function ManifestBrowser({
           <RefreshPanel
             workspaceId={workspaceId}
             connectionId={connectionId}
+            engine={engine}
             canManage={canManage}
             lastPublished={data?.lastPublished ?? null}
           />
@@ -218,10 +231,10 @@ function ManifestBrowser({
               title="Not discovered yet"
               description={
                 isRefreshActive(latest.data)
-                  ? "Manifest is reading this source's catalog now. Its tables appear here when the refresh finishes."
+                  ? `Manifest is reading this source now. Its ${terms.objects} appear here when the refresh finishes.`
                   : canManage
-                    ? "Refresh the metadata to read this source's tables, views, columns, and relationships."
-                    : "Its tables appear here once an owner or admin refreshes the metadata."
+                    ? `Refresh the metadata to read this source's ${terms.objects} and their ${terms.columns}.`
+                    : `Its ${terms.objects} appear here once an owner or admin refreshes the metadata.`
               }
             />
           )}
@@ -231,6 +244,7 @@ function ManifestBrowser({
                 <ObjectList
                   connectionId={connectionId}
                   manifest={data}
+                  terms={terms}
                   search={searchInput}
                   onSearchChange={setSearchInput}
                   searching={manifest.isPlaceholderData || search !== searchInput.trim()}
@@ -244,11 +258,14 @@ function ManifestBrowser({
                     workspaceId={workspaceId}
                     connectionId={connectionId}
                     objectId={objectId}
+                    terms={terms}
                     canEdit={canManage}
                   />
                 ) : (
                   <p className="rounded-lg border border-dashed border-(--border) px-6 py-12 text-center text-sm text-(--muted)">
-                    Choose a table or view to see its columns, keys, and relationships.
+                    {engine === "mongodb"
+                      ? "Choose a collection or view to see its fields, the types found in a sample, and its relationships."
+                      : "Choose a table or view to see its columns, keys, and relationships."}
                   </p>
                 )}
               </div>

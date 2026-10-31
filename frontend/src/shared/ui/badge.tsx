@@ -11,6 +11,7 @@ const badgeVariants = cva(
         neutral: "border-(--border) bg-(--surface) text-(--muted)",
         success: "border-(--success-border) bg-(--success-surface) text-(--success)",
         danger: "border-(--danger-border) bg-(--danger-surface) text-(--danger)",
+        warning: "border-(--warning-border) bg-(--warning-surface) text-(--warning)",
       },
     },
     defaultVariants: { tone: "neutral" },

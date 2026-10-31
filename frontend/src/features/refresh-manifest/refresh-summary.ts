@@ -1,23 +1,36 @@
+import { ENGINE_TERMS } from "../../entities/connections/engine.ts"
+import type { ConnectionEngine } from "../../entities/connections/types.ts"
 import type {
   ManifestRefresh,
   RefreshCounts,
   RefreshPhase,
 } from "../../entities/manifests/types.ts"
 
-export const PHASE_LABELS: Record<RefreshPhase, string> = {
-  connecting: "Connecting to the source",
-  reading_objects: "Reading tables and views",
-  reading_columns: "Reading columns",
-  reading_relationships: "Reading relationships",
-  publishing: "Publishing",
+export const PHASE_LABELS: Record<ConnectionEngine, Record<RefreshPhase, string>> = {
+  postgres: {
+    connecting: "Connecting to the source",
+    reading_objects: "Reading tables and views",
+    reading_columns: "Reading columns",
+    reading_relationships: "Reading relationships",
+    publishing: "Publishing",
+  },
+  mongodb: {
+    connecting: "Connecting to the source",
+    reading_objects: "Listing collections and views",
+    reading_columns: "Sampling documents",
+    reading_relationships: "Reading relationships",
+    publishing: "Publishing",
+  },
 }
 
 function plural(count: number, one: string, many: string): string {
   return `${count.toLocaleString("en-US")} ${count === 1 ? one : many}`
 }
 
-const objects = (count: number) => plural(count, "table or view", "tables and views")
-const columns = (count: number) => plural(count, "column", "columns")
+const objects = (count: number, engine: ConnectionEngine) =>
+  plural(count, ENGINE_TERMS[engine].object, ENGINE_TERMS[engine].objects)
+const columns = (count: number, engine: ConnectionEngine) =>
+  plural(count, ENGINE_TERMS[engine].column, ENGINE_TERMS[engine].columns)
 
 export interface RefreshProgress {
   label: string
@@ -27,43 +40,49 @@ export interface RefreshProgress {
   max: number | null
 }
 
-export function refreshProgress(refresh: ManifestRefresh): RefreshProgress {
+export function refreshProgress(
+  refresh: ManifestRefresh,
+  engine: ConnectionEngine = "postgres",
+): RefreshProgress {
   if (refresh.status === "queued") {
     return { label: "Waiting to start", detail: null, value: null, max: null }
   }
-  const label = refresh.phase ? PHASE_LABELS[refresh.phase] : "Starting"
+  const label = refresh.phase ? PHASE_LABELS[engine][refresh.phase] : "Starting"
   const total = refresh.objectsTotal
   if (total === null || total === 0) return { label, detail: null, value: null, max: null }
   const done = Math.min(refresh.objectsDone, total)
   return {
     label,
-    detail: `${done.toLocaleString("en-US")} of ${objects(total)}`,
+    detail: `${done.toLocaleString("en-US")} of ${objects(total, engine)}`,
     value: done,
     max: total,
   }
 }
 
-/** "6 tables and views · 52 columns · 6 relationships" */
-export function describeCounts(counts: RefreshCounts): string {
+/** "6 tables and views · 52 columns · 6 relationships"; MongoDB declares no relationships. */
+export function describeCounts(counts: RefreshCounts, engine: ConnectionEngine = "postgres"): string {
   return [
-    objects(counts.objects),
-    columns(counts.columns),
-    plural(counts.relationships, "relationship", "relationships"),
+    objects(counts.objects, engine),
+    columns(counts.columns, engine),
+    ...(engine === "postgres" ? [plural(counts.relationships, "relationship", "relationships")] : []),
   ].join(" · ")
 }
 
 /** What changed since the previous refresh, or null when nothing did (or everything is new). */
-export function describeChanges(counts: RefreshCounts): string | null {
+export function describeChanges(
+  counts: RefreshCounts,
+  engine: ConnectionEngine = "postgres",
+): string | null {
   const firstDiscovery =
     counts.objectsAdded === counts.objects &&
     counts.objectsRemoved === 0 &&
     counts.columnsRemoved === 0
   if (firstDiscovery) return null
   const parts = [
-    counts.objectsAdded > 0 && `${objects(counts.objectsAdded)} added`,
-    counts.objectsRemoved > 0 && `${objects(counts.objectsRemoved)} removed`,
-    counts.columnsAdded > 0 && `${columns(counts.columnsAdded)} added`,
-    counts.columnsRemoved > 0 && `${columns(counts.columnsRemoved)} removed`,
+    counts.objectsAdded > 0 && `${objects(counts.objectsAdded, engine)} added`,
+    counts.objectsRemoved > 0 && `${objects(counts.objectsRemoved, engine)} removed`,
+    counts.columnsAdded > 0 && `${columns(counts.columnsAdded, engine)} added`,
+    counts.columnsRemoved > 0 && `${columns(counts.columnsRemoved, engine)} removed`,
   ].filter((part): part is string => typeof part === "string")
   return parts.length > 0 ? parts.join(", ") : null
 }

@@ -10,7 +10,7 @@ import { Button } from "@/shared/ui/button.tsx"
 import { Markdown } from "@/shared/ui/markdown.tsx"
 
 import { MeaningForm } from "./MeaningForm.tsx"
-import { OBJECT_FIELDS, OBJECT_KEYS } from "./meaning-fields.ts"
+import { OBJECT_KEYS, objectFieldsFor } from "./meaning-fields.ts"
 
 export function EditedBy({ by, at }: { by: Author | null; at: string | null }) {
   if (!at) return null
@@ -47,7 +47,7 @@ function ObjectMeaningForm({
   return (
     <MeaningForm
       title={`Business context for ${object.schema}.${object.name}`}
-      fields={OBJECT_FIELDS}
+      fields={objectFieldsFor(object)}
       editor={editor}
       newerBy={editor.newer?.editedBy?.name ?? null}
       newerAt={editor.newer?.editedAt ?? null}
@@ -75,6 +75,7 @@ export function ObjectMeaning({
   const editButton = useRef<HTMLButtonElement>(null)
   const returnFocus = useRef(false)
   const empty = !object.label && !object.rowMeaning && !object.description
+  const row = object.details?.engine === "mongodb" ? "document" : "row"
 
   useEffect(() => {
     if (!editing && returnFocus.current) {
@@ -116,7 +117,7 @@ export function ObjectMeaning({
       {empty ? (
         <p className="text-sm text-(--muted)">
           {canEdit
-            ? "No one has described this yet. Add a label, what one row represents, and what the data means."
+            ? `No one has described this yet. Add a label, what one ${row} represents, and what the data means.`
             : "No one has described this yet. Owners and admins can add business context."}
         </p>
       ) : (
@@ -131,7 +132,7 @@ export function ObjectMeaning({
               )}
               {object.rowMeaning && (
                 <>
-                  <dt className="text-(--muted)">Each row is</dt>
+                  <dt className="text-(--muted)">Each {row} is</dt>
                   <dd className="break-words">{object.rowMeaning}</dd>
                 </>
               )}

@@ -1,5 +1,6 @@
 import type {
   ManifestColumn,
+  ManifestObject,
   ManifestRelationship,
   UpdateRelationshipInput,
 } from "../../entities/manifests/types.ts"
@@ -36,6 +37,16 @@ export const OBJECT_FIELDS = [
 
 export type ObjectField = (typeof OBJECT_FIELDS)[number]["key"]
 export const OBJECT_KEYS = OBJECT_FIELDS.map((field) => field.key)
+
+/** MongoDB collections hold documents, so their row meaning reads "Each document is". */
+export function objectFieldsFor(object: Pick<ManifestObject, "details">): readonly FieldDef<ObjectField>[] {
+  if (object.details?.engine !== "mongodb") return OBJECT_FIELDS
+  return OBJECT_FIELDS.map((field) =>
+    field.key === "rowMeaning"
+      ? { ...field, label: "Each document is", placeholder: "e.g. one document per storefront visit" }
+      : field,
+  )
+}
 
 export const COLUMN_FIELDS = [
   { key: "label", label: "Label", max: 200, kind: "line", placeholder: "Business name, e.g. Order total" },

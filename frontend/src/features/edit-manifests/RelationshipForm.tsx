@@ -1,5 +1,6 @@
 import { useId } from "react"
 
+import { ENGINE_TERMS } from "@/entities/connections/engine.ts"
 import {
   useCreateRelationship,
   useManifest,
@@ -34,11 +35,20 @@ const describeEnds = (relationship: ManifestRelationship) =>
   `${relationship.from.schema}.${relationship.from.name} (${relationship.from.columns.join(", ")}) → ${relationship.to.schema}.${relationship.to.name} (${relationship.to.columns.join(", ")})`
 
 /** Present columns, plus the chosen one when it has left the source so the choice stays visible. */
-function ColumnOptions({ columns, chosen }: { columns: ManifestColumn[]; chosen: string }) {
+function ColumnOptions({
+  columns,
+  chosen,
+  noun,
+}: {
+  columns: ManifestColumn[]
+  chosen: string
+  /** "column", or "field" for MongoDB. */
+  noun: string
+}) {
   const removed = chosen && !columns.some((column) => column.present && column.name === chosen)
   return (
     <>
-      <option value="">Choose a column</option>
+      <option value="">Choose a {noun}</option>
       {removed && (
         <option value={chosen} disabled>
           {chosen} (removed from the source)
@@ -78,6 +88,8 @@ export function RelationshipForm({
   const id = useId()
   const isKey = relationship?.origin === "foreign_key"
   const from = relationship?.from ?? { objectId: object.id, schema: object.schema, name: object.name }
+  // MongoDB sources link collections by their fields.
+  const terms = ENGINE_TERMS[object.details?.engine ?? "postgres"]
   const create = useCreateRelationship(workspaceId, connectionId)
   const update = useUpdateRelationship(workspaceId, connectionId)
 
@@ -90,7 +102,7 @@ export function RelationshipForm({
         ? relationshipPatch(state, fromColumns, toColumns)
         : newRelationship(state.draft, fromColumns, toColumns),
     save: (payload) => {
-      if (!payload) return Promise.reject(new Error("Choose both columns first."))
+      if (!payload) return Promise.reject(new Error(`Choose both ${terms.columns} first.`))
       return relationship
         ? update.mutateAsync({ relationshipId: relationship.id, patch: payload as UpdateRelationshipInput })
         : create.mutateAsync(payload as CreateRelationshipInput)
@@ -147,13 +159,13 @@ export function RelationshipForm({
       ) : (
         <>
           <p className="text-sm text-(--muted)">
-            Record a link the database does not declare. Both columns need comparable types, such as
-            numbers with numbers or text with text.
+            Record a link the database does not declare. Both {terms.columns} need comparable types,
+            such as numbers with numbers or text with text.
           </p>
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-1">
               <Label htmlFor={`${id}-from`}>
-                Column in {from.schema}.{from.name}
+                {terms.column === "field" ? "Field" : "Column"} in {from.schema}.{from.name}
               </Label>
               <Select
                 id={`${id}-from`}
@@ -162,11 +174,11 @@ export function RelationshipForm({
                 autoFocus
                 onChange={(event) => editor.setField("fromColumn", event.target.value)}
               >
-                <ColumnOptions columns={fromColumns} chosen={draft.fromColumn} />
+                <ColumnOptions columns={fromColumns} chosen={draft.fromColumn} noun={terms.column} />
               </Select>
             </div>
             <div className="space-y-1">
-              <Label htmlFor={`${id}-to-object`}>Refers to table or view</Label>
+              <Label htmlFor={`${id}-to-object`}>Refers to {terms.object}</Label>
               <Select
                 id={`${id}-to-object`}
                 value={draft.toObjectId}
@@ -176,7 +188,7 @@ export function RelationshipForm({
                   editor.setField("toColumn", "")
                 }}
               >
-                <option value="">Choose a table or view</option>
+                <option value="">Choose a {terms.object}</option>
                 {manifest.data?.schemas.map((schema) => (
                   <optgroup key={schema.name} label={schema.name}>
                     {schema.objects
@@ -192,18 +204,18 @@ export function RelationshipForm({
               </Select>
             </div>
             <div className="space-y-1">
-              <Label htmlFor={`${id}-to-column`}>Refers to column</Label>
+              <Label htmlFor={`${id}-to-column`}>Refers to {terms.column}</Label>
               <Select
                 id={`${id}-to-column`}
                 value={draft.toColumn}
                 disabled={!toDetail.data}
                 onChange={(event) => editor.setField("toColumn", event.target.value)}
               >
-                <ColumnOptions columns={toColumns} chosen={draft.toColumn} />
+                <ColumnOptions columns={toColumns} chosen={draft.toColumn} noun={terms.column} />
               </Select>
               {draft.toObjectId && toDetail.isPending && (
                 <p role="status" className="text-xs text-(--muted)">
-                  Loading columns…
+                  Loading {terms.columns}…
                 </p>
               )}
             </div>

@@ -9,6 +9,7 @@ import {
   draftFromConnection,
   emptyDraft,
   needsPasswordReentry,
+  withEngine,
   parsePort,
   sameConnectionSettings,
   schemaOptions,
@@ -19,19 +20,50 @@ import {
 } from "../src/features/manage-connections/connection-form.ts"
 import { ApiError } from "../src/shared/api/client.ts"
 
-const saved: Connection = {
+const common = {
   id: "c1",
   workspaceId: "w1",
   name: "Demo store",
-  engine: "postgres",
-  config: { host: "db.example.com", port: 5432, database: "shop", username: "reader", sslMode: "require" },
   hasPassword: true,
   schemas: ["support", "shop"],
-  status: "connected",
+  status: "connected" as const,
   lastTestedAt: "2026-10-30T10:00:00.000Z",
   lastError: null,
   createdAt: "2026-10-30T10:00:00.000Z",
   updatedAt: "2026-10-30T10:00:00.000Z",
+  capabilities: {
+    queryLanguage: "sql" as const,
+    operations: ["sql_select" as const],
+    readOnly: true as const,
+    joins: true,
+    aggregates: true,
+    allowedStages: null,
+    forbiddenStages: null,
+    forbiddenOperators: [],
+    summary: "Read-only SQL",
+  },
+}
+
+const saved: Connection = {
+  ...common,
+  engine: "postgres",
+  config: { host: "db.example.com", port: 5432, database: "shop", username: "reader", sslMode: "require" },
+}
+
+const savedMongo: Connection = {
+  ...common,
+  name: "Events",
+  engine: "mongodb",
+  config: { mode: "fields", host: "mongo.example.com", port: 27017, database: "events", username: "reader", authSource: null, tls: true },
+  schemas: ["events"],
+}
+
+const savedUri: Connection = {
+  ...common,
+  name: "Atlas",
+  engine: "mongodb",
+  config: { mode: "uri", hosts: ["cluster0.example.net"], srv: true, database: "events" },
+  schemas: ["events"],
 }
 
 function filled(overrides: Partial<ConnectionDraft> = {}): ConnectionDraft {
@@ -77,7 +109,7 @@ test("form drafts become trimmed API payloads; an empty password is omitted", ()
   const test = toTestInput(filled({ password: "" }))
   assert.ok(test)
   assert.equal("password" in test, false)
-  assert.equal(toTestInput(filled(), "c1")?.connectionId, "c1")
+  assert.equal(toTestInput(filled(), saved)?.connectionId, "c1")
 
   assert.deepEqual(toCreateInput(filled(), ["support", "shop"]), {
     name: "Demo store",
@@ -100,7 +132,7 @@ test("edits send only what changed and keep the saved password when left blank",
     schemas: ["shop"],
   })
   const moved = toUpdateInput(saved, { ...unchanged, database: "shop_v2", password: "new" }, saved.schemas)
-  assert.equal(moved?.config?.database, "shop_v2")
+  assert.deepEqual(moved?.config, { ...saved.config, database: "shop_v2" })
   assert.equal(moved?.password, "new")
 })
 
@@ -145,4 +177,90 @@ test("describeConnectionError surfaces the mapped reason and validation messages
   })
   assert.equal(describeConnectionError(invalid).message, "Enter a host name or IP address")
   assert.equal(describeConnectionError(new Error("offline")).message, "offline")
+})
+
+test("MongoDB drafts: fields or a connection string, with their own checks", () => {
+  const mongo = withEngine(filled({ username: "", password: "" }), "mongodb")
+  assert.equal(mongo.port, "27017")
+  assert.equal(withEngine(filled({ port: "6000" }), "mongodb").port, "6000")
+  assert.deepEqual(configFromDraft(mongo), {
+    mode: "fields",
+    host: "db.example.com",
+    port: 27017,
+    database: "shop",
+    username: null,
+    authSource: null,
+    tls: true,
+  })
+  assert.match(draftErrors({ ...mongo, database: "my.db" }).database ?? "", /cannot contain/)
+  assert.match(draftErrors({ ...mongo, password: "pw" }).username ?? "", /username for this password/)
+
+  const uriDraft = { ...mongo, mongoMode: "uri" as const, password: "ignored" }
+  assert.match(draftErrors(uriDraft).uri ?? "", /Paste the connection string/)
+  assert.match(draftErrors({ ...uriDraft, uri: "postgres://x" }).uri ?? "", /mongodb:\/\//)
+  const uri = "mongodb+srv://reader:pw@cluster0.example.net/events"
+  assert.deepEqual(toCreateInput({ ...uriDraft, uri: ` ${uri} ` }, ["events"]), {
+    name: "Demo store",
+    engine: "mongodb",
+    config: { mode: "uri" },
+    uri,
+    schemas: ["events"],
+  })
+  // A saved connection string is kept when the field is left blank.
+  assert.deepEqual(toTestInput(draftFromConnection(savedUri), savedUri), {
+    engine: "mongodb",
+    config: { mode: "uri" },
+    connectionId: "c1",
+  })
+  assert.equal(sameConnectionSettings(uriDraft, { ...uriDraft, uri: "mongodb://other" }), false)
+  assert.equal(sameConnectionSettings(uriDraft, mongo), false)
+})
+
+test("MongoDB edits: only changes are sent, and secrets are reused only where the backend allows", () => {
+  const fields = draftFromConnection(savedMongo)
+  assert.deepEqual(toUpdateInput(savedMongo, fields, ["events"]), {})
+  assert.deepEqual(toUpdateInput(savedMongo, { ...fields, database: "events_v2" }, ["events"])?.config, {
+    mode: "fields",
+    host: "mongo.example.com",
+    port: 27017,
+    database: "events_v2",
+    username: "reader",
+    authSource: null,
+    tls: true,
+  })
+  assert.equal(needsPasswordReentry(savedMongo, { ...fields, database: "other" }), false)
+  assert.equal(needsPasswordReentry(savedMongo, { ...fields, tls: false }), true)
+  assert.equal(needsPasswordReentry(savedMongo, { ...fields, authSource: "events" }), true)
+  // Clearing the username stops signing in, so no password is needed.
+  const anonymous = { ...fields, username: "" }
+  assert.equal(needsPasswordReentry(savedMongo, anonymous), false)
+  assert.equal(toUpdateInput(savedMongo, anonymous, ["events"])?.config?.username, null)
+
+  const uriDraft = draftFromConnection(savedUri)
+  assert.equal(uriDraft.mongoMode, "uri")
+  assert.equal(uriDraft.uri, "")
+  assert.deepEqual(toUpdateInput(savedUri, { ...uriDraft, name: "Atlas prod" }, ["events"]), { name: "Atlas prod" })
+  assert.deepEqual(toUpdateInput(savedUri, { ...uriDraft, uri: "mongodb://h/events" }, ["events"]), {
+    uri: "mongodb://h/events",
+  })
+  // Switching to host and port with a username needs a typed password.
+  const switched = { ...uriDraft, mongoMode: "fields" as const, host: "h", username: "reader" }
+  assert.equal(needsPasswordReentry(savedUri, switched), true)
+  assert.deepEqual(toUpdateInput(savedUri, { ...switched, password: "pw" }, ["events"]), {
+    config: {
+      mode: "fields",
+      host: "h",
+      port: 27017,
+      database: "events",
+      username: "reader",
+      authSource: null,
+      tls: true,
+    },
+    password: "pw",
+  })
+})
+
+test("describeConnectionError titles field-level validation as a form problem", () => {
+  const invalid = new ApiError(422, "VALIDATION_FAILED", "Enter the connection string.", "r3", { field: "uri" })
+  assert.deepEqual(describeConnectionError(invalid), { title: "Check the form", message: "Enter the connection string." })
 })

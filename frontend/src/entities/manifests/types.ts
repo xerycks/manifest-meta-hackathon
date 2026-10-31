@@ -10,6 +10,42 @@ export type ManifestObjectKind =
   | "materialized_view"
   | "partitioned_table"
   | "foreign_table"
+  | "collection"
+
+/** How many sampled documents held something, e.g. the "string" type in 184 of 200. */
+export interface TypeCount {
+  /** A BSON type as MongoDB's $type names it: "string", "int", "objectId", ... */
+  type: string
+  documents: number
+}
+
+/** What sampling saw of a MongoDB field. Types count documents, so a mix is never collapsed. */
+export interface MongoFieldDetails {
+  engine: "mongodb"
+  sampleSize: number
+  /** Most common first. */
+  types: TypeCount[]
+  /** Sampled documents without the field. */
+  missing: number
+  /** For array values: their element types. */
+  arrayElementTypes: TypeCount[] | null
+  /** 0 for top-level fields. */
+  depth: number
+}
+
+export interface MongoCollectionDetails {
+  engine: "mongodb"
+  collectionType: "collection" | "timeseries" | "view"
+  capped: boolean
+  sampleSize: number
+  /** "random" uses $sample; "first" read documents in natural order. */
+  sampleMethod: "random" | "first"
+  sampleBytesLimited: boolean
+  fieldsTruncated: boolean
+  depthTruncated: boolean
+  /** Why the last refresh could not sample it; the fields shown are from an earlier sample. */
+  sampleFailure: string | null
+}
 
 export type RefreshStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled"
 export type RefreshTrigger = "manual" | "source_created" | "source_changed"
@@ -86,6 +122,8 @@ export interface ManifestObject {
   removedAt: string | null
   firstSeenAt: string
   lastSeenAt: string
+  /** Engine-specific facts (MongoDB: how the collection was sampled). */
+  details: MongoCollectionDetails | null
   label: string | null
   /** Markdown. */
   description: string | null
@@ -110,6 +148,8 @@ export interface ManifestColumn {
   comment: string | null
   present: boolean
   removedAt: string | null
+  /** Engine-specific facts (MongoDB: the sampled type mix and presence). */
+  details: MongoFieldDetails | null
   label: string | null
   /** Markdown. */
   description: string | null

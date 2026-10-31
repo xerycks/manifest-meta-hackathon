@@ -35,7 +35,7 @@ export function ManifestSearch({ workspaceId }: { workspaceId: string | null }) 
   return (
     <div role="search" className="max-w-2xl">
       <label htmlFor={id} className="text-sm font-medium">
-        Search tables, columns, and definitions
+        Search tables, collections, columns, fields, and definitions
       </label>
       <div className="relative mt-1">
         <Search

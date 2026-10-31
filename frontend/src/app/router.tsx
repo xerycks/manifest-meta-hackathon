@@ -1,4 +1,4 @@
-import { Component, type ReactNode } from "react"
+import { Component, lazy, Suspense, type ReactNode } from "react"
 import { Navigate, Outlet, createBrowserRouter } from "react-router-dom"
 
 import { HomePage } from "@/pages/home/HomePage.tsx"
@@ -10,12 +10,22 @@ import { ManifestsPage } from "@/pages/manifests/ManifestsPage.tsx"
 import { NotFoundPage } from "@/pages/not-found/NotFoundPage.tsx"
 import { PlaceholderPage } from "@/pages/placeholder/PlaceholderPage.tsx"
 import { SettingsPage } from "@/pages/settings/SettingsPage.tsx"
-import { EditSourcePage } from "@/pages/sources/EditSourcePage.tsx"
-import { NewSourcePage } from "@/pages/sources/NewSourcePage.tsx"
 import { SourcesPage } from "@/pages/sources/SourcesPage.tsx"
-import { ErrorState } from "@/shared/ui/states.tsx"
+import { ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
 import { AppLayout } from "./layouts/AppLayout.tsx"
+
+// The connection form only loads when a source is added or edited.
+const NewSourcePage = lazy(() =>
+  import("@/pages/sources/NewSourcePage.tsx").then((module) => ({ default: module.NewSourcePage })),
+)
+const EditSourcePage = lazy(() =>
+  import("@/pages/sources/EditSourcePage.tsx").then((module) => ({ default: module.EditSourcePage })),
+)
+
+function Lazy({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<LoadingState label="Loading…" />}>{children}</Suspense>
+}
 
 class RouteErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   override state = { failed: false }
@@ -65,8 +75,8 @@ export const router = createBrowserRouter([
             ),
           },
           { path: "sources", element: <SourcesPage /> },
-          { path: "sources/new", element: <NewSourcePage /> },
-          { path: "sources/:connectionId", element: <EditSourcePage /> },
+          { path: "sources/new", element: <Lazy><NewSourcePage /></Lazy> },
+          { path: "sources/:connectionId", element: <Lazy><EditSourcePage /></Lazy> },
           { path: "manifests", element: <ManifestsPage /> },
           { path: "manifests/knowledge", element: <KnowledgePage /> },
           { path: "manifests/knowledge/new", element: <NewKnowledgeEntryPage /> },

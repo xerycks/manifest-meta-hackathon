@@ -31,12 +31,12 @@ export interface SearchResultGroup {
   items: SearchResultItem[]
 }
 
-/** Search results as linked groups (tables and views, columns, knowledge entries); empty groups are dropped. */
+/** Search results as linked groups (tables, views, and collections; columns and fields; knowledge entries); empty groups are dropped. */
 export function groupSearchResults(results: SearchResults): SearchResultGroup[] {
   const groups: SearchResultGroup[] = [
     {
       id: "objects",
-      label: "Tables and views",
+      label: "Tables, views, and collections",
       items: results.objects.map((hit) => ({
         key: `object:${hit.objectId}`,
         href: objectHref(hit.connectionId, hit.objectId),
@@ -49,7 +49,7 @@ export function groupSearchResults(results: SearchResults): SearchResultGroup[] 
     },
     {
       id: "columns",
-      label: "Columns",
+      label: "Columns and fields",
       items: results.columns.map((hit) => ({
         key: `column:${hit.columnId}`,
         href: columnHref(hit.connectionId, hit.objectId, hit.columnId),

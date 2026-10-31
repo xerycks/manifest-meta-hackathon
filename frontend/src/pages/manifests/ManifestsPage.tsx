@@ -1,9 +1,11 @@
-import { BookMarked, ChevronRight, Database } from "lucide-react"
+import { BookMarked, ChevronRight } from "lucide-react"
 import { Link } from "react-router-dom"
 
 import { managesWorkspace } from "@/app/organization-role.ts"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useConnections } from "@/entities/connections/api.ts"
+import { ENGINE_LABELS } from "@/entities/connections/engine.ts"
+import { EngineIcon } from "@/entities/connections/EngineIcon.tsx"
 import { KNOWLEDGE_HREF } from "@/entities/knowledge/links.ts"
 import { errorMessage } from "@/features/browse-manifest/manifest-view.ts"
 import { ManifestSearch } from "@/features/search-manifests/ManifestSearch.tsx"
@@ -25,8 +27,8 @@ export function ManifestsPage() {
         <div className="max-w-2xl">
           <h1 className="text-2xl font-semibold tracking-tight">Manifests</h1>
           <p className="mt-1 leading-7 text-(--muted)">
-            The tables, views, columns, and relationships in each source, and what they mean. Choose a
-            source to browse and describe it.
+            The tables, collections, columns, fields, and relationships in each source, and what they
+            mean. Choose a source to browse and describe it.
           </p>
         </div>
         <Link to={KNOWLEDGE_HREF} className={buttonVariants({ variant: "secondary" })}>
@@ -70,11 +72,14 @@ export function ManifestsPage() {
                 to={`/manifests/${connection.id}`}
                 className="flex h-full items-center gap-3 rounded-lg border border-(--border) bg-white p-4 hover:bg-(--surface) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
               >
-                <Database aria-hidden className="size-5 shrink-0 text-(--muted)" />
+                <EngineIcon engine={connection.engine} className="size-5 text-(--muted)" />
                 <span className="min-w-0 flex-1">
                   <span className="block font-medium break-words">{connection.name}</span>
                   <span className="block text-sm break-words text-(--muted)">
-                    {connection.config.database} · {connection.schemas.join(", ")}
+                    {ENGINE_LABELS[connection.engine]} ·{" "}
+                    {connection.engine === "postgres"
+                      ? `${connection.config.database} · ${connection.schemas.join(", ")}`
+                      : connection.schemas.join(", ")}
                   </span>
                 </span>
                 <ChevronRight aria-hidden className="size-4 shrink-0 text-(--muted)" />
