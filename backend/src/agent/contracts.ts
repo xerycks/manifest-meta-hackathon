@@ -103,7 +103,7 @@ export interface AgentAnswer {
 
 /** A safe, user-facing failure written by Manifest. */
 export interface RunError {
-  /** AGENT_STEP_LIMIT, AGENT_TIMEOUT, AGENT_INPUT_TIMEOUT, AGENT_PROVIDER_ERROR, AGENT_REFUSED, AGENT_OUTPUT_LIMIT, AGENT_INTERRUPTED, INTERNAL_ERROR */
+  /** AGENT_STEP_LIMIT, AGENT_TIMEOUT, AGENT_INPUT_TIMEOUT, AGENT_NO_CLARIFICATION, AGENT_PROVIDER_ERROR, AGENT_REFUSED, AGENT_OUTPUT_LIMIT, AGENT_INTERRUPTED, INTERNAL_ERROR */
   code: string
   message: string
 }
@@ -219,6 +219,8 @@ export interface ConversationSummary extends Conversation {
   status: RunStatus | null
   /** The latest question waits for the user's answer to a clarification. */
   pendingClarification: boolean
+  /** The routine that asks its questions here, while it exists. */
+  routine: { id: string; name: string } | null
 }
 
 /** One page of the user's conversations, newest activity first. */

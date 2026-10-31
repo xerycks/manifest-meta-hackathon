@@ -61,6 +61,11 @@ const envSchema = z
     // How long a question waits for the user's reply to a clarification (the
     // run's own time limit is paused meanwhile).
     AGENT_ANSWER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(1_800_000),
+
+    // Scheduled routines (Cycle 16): the shortest time a schedule may leave
+    // between runs, and how often each backend looks for routines that are due.
+    ROUTINE_MIN_INTERVAL_MINUTES: z.coerce.number().int().min(1).max(1_440).default(5),
+    ROUTINE_POLL_INTERVAL_MS: z.coerce.number().int().min(1_000).max(300_000).default(15_000),
   })
   .superRefine((env, ctx) => {
     if (Boolean(env.GOOGLE_CLIENT_ID) !== Boolean(env.GOOGLE_CLIENT_SECRET)) {

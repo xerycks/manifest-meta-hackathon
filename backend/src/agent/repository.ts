@@ -61,8 +61,8 @@ export interface NewRun {
   id: string
   workspaceId: string
   conversationId: string
-  /** Starts the conversation with this title; omitted: the conversation exists. */
-  newConversation?: { title: string }
+  /** Starts the conversation with this title (a routine's, given its id); omitted: the conversation exists. */
+  newConversation?: { title: string; routineId?: string }
   userId: string
   question: string
   connectionIds: string[]
@@ -241,6 +241,15 @@ export class AgentRunsRepository {
     return rows[0] ? toConversation(rows[0]) : null
   }
 
+  /** The user's conversation that a routine asks in, if it has one yet. */
+  async routineConversation(workspaceId: string, userId: string, routineId: string): Promise<string | null> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      "SELECT id FROM conversations WHERE workspace_id = $1 AND user_id = $2 AND routine_id = $3",
+      [workspaceId, userId, routineId],
+    )
+    return rows[0]?.id ?? null
+  }
+
   /** The user's conversations, newest activity (question asked) first, after `cursor`. */
   async listConversations(
     workspaceId: string,
@@ -248,12 +257,20 @@ export class AgentRunsRepository {
     page: { limit: number; cursor?: ConversationCursor | undefined },
   ): Promise<ConversationPage> {
     const { rows } = await this.pool.query<
-      ConversationRow & { activity: string; status: RunStatus | null; pending_clarification: boolean }
+      ConversationRow & {
+        activity: string
+        status: RunStatus | null
+        pending_clarification: boolean
+        routine_id: string | null
+        routine_name: string | null
+      }
     >(
       `SELECT c.id, c.title, c.created_at, c.updated_at,
               to_char(c.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS activity,
-              latest.status, coalesce(latest.clarification IS NOT NULL, false) AS pending_clarification
+              latest.status, coalesce(latest.clarification IS NOT NULL, false) AS pending_clarification,
+              rt.id AS routine_id, rt.name AS routine_name
          FROM conversations c
+         LEFT JOIN routines rt ON rt.workspace_id = c.workspace_id AND rt.id = c.routine_id
          LEFT JOIN LATERAL (
            SELECT r.status, r.clarification FROM agent_runs r
             WHERE r.workspace_id = c.workspace_id AND r.conversation_id = c.id
@@ -273,6 +290,7 @@ export class AgentRunsRepository {
         ...toConversation(row),
         status: row.status,
         pendingClarification: row.pending_clarification,
+        routine: row.routine_id && row.routine_name ? { id: row.routine_id, name: row.routine_name } : null,
       })),
       nextCursor:
         rows.length > page.limit && last ? encodeCursor({ activity: last.activity, id: last.id }) : null,
@@ -337,8 +355,15 @@ export class AgentRunsRepository {
     return this.transaction(async (client) => {
       if (input.newConversation) {
         await client.query(
-          "INSERT INTO conversations (id, workspace_id, user_id, title) VALUES ($1, $2, $3, $4)",
-          [input.conversationId, input.workspaceId, input.userId, input.newConversation.title],
+          `INSERT INTO conversations (id, workspace_id, user_id, title, routine_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            input.conversationId,
+            input.workspaceId,
+            input.userId,
+            input.newConversation.title,
+            input.newConversation.routineId ?? null,
+          ],
         )
       }
       const { rows } = await client.query<RunRow>(

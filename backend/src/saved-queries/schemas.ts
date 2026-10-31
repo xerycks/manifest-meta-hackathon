@@ -174,13 +174,13 @@ export const updateSavedQuerySchema = z
 
 export type UpdateSavedQueryInput = z.infer<typeof updateSavedQuerySchema>
 
-/** Values for one run by parameter name: a date or datetime, a relative date, or null for none. */
-export const runSavedQuerySchema = z.strictObject({
-  parameters: z
-    .record(z.string().max(63), z.union([z.string().trim().max(40), parameterValueSchema, z.null()]))
-    .refine((values) => Object.keys(values).length <= 50, "Send at most 50 parameter values")
-    .default({}),
-})
+/** Values by parameter name: a date or datetime, a relative date, or null for none. */
+export const runValuesSchema = z
+  .record(z.string().max(63), z.union([z.string().trim().max(40), parameterValueSchema, z.null()]))
+  .refine((values) => Object.keys(values).length <= 50, "Send at most 50 parameter values")
+
+/** Values for one run; parameters left out take their default. */
+export const runSavedQuerySchema = z.strictObject({ parameters: runValuesSchema.default({}) })
 
 export type RunSavedQueryInput = z.infer<typeof runSavedQuerySchema>
 

@@ -42,6 +42,10 @@ import { QueryExecutionsRepository } from "../queries/repository.js"
 import { queriesRouter, type QueriesDeps } from "../queries/routes.js"
 import { QueryRunner } from "../queries/runner.js"
 import { QueryExecutor } from "../queries/service.js"
+import { RoutineDispatcher } from "../routines/dispatcher.js"
+import { RoutinesRepository } from "../routines/repository.js"
+import { routinesRouter, type RoutinesDeps } from "../routines/routes.js"
+import { RoutinesService } from "../routines/service.js"
 import { SavedQueriesRepository } from "../saved-queries/repository.js"
 import { savedQueriesRouter, type SavedQueriesDeps } from "../saved-queries/routes.js"
 import { SavedQueriesService } from "../saved-queries/service.js"
@@ -73,6 +77,11 @@ export interface AppDeps {
   agents?: AgentRunner
   /** Dashboard refreshes; pass it in to stop them on shutdown (or to tune their retries in tests). */
   dashboardRefreshes?: DashboardRefresher
+  /**
+   * Runs routines; pass it in to start its schedule and stop it on shutdown
+   * (or to tick it with a test clock). Without it, only manual runs happen.
+   */
+  routineDispatcher?: RoutineDispatcher
   /** Replaces the provider configured by AGENT_PROVIDER (null: none, so agent routes answer 503). */
   modelProvider?: ModelProvider | null
   /** Heartbeat interval of agent event streams (15 s by default); shorter in tests. */
@@ -96,6 +105,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let queriesDeps: QueriesDeps | null = null
   let savedQueriesDeps: SavedQueriesDeps | null = null
   let dashboardsDeps: DashboardsDeps | null = null
+  let routinesDeps: RoutinesDeps | null = null
   let agentDeps: AgentDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
@@ -190,6 +200,28 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
           : null,
       }),
     }
+    const agent = provider
+      ? new AgentService({
+          runs,
+          connections: connectionsRepository,
+          manifests: manifestsRepository,
+          knowledge,
+          settings,
+          executions,
+          tools: createAgentTools({
+            connections: connectionsRepository,
+            manifests: manifestsRepository,
+            knowledge,
+            search,
+            executor,
+            executions,
+            runs,
+          }),
+          provider,
+          runner: deps.agents ?? new AgentRunner(),
+          limits: agentLimits(env),
+        })
+      : null
     agentDeps = {
       workspaces,
       auth,
@@ -197,29 +229,25 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       runs,
       connections: connectionsRepository,
       ...(deps.streamHeartbeatMs !== undefined ? { heartbeatMs: deps.streamHeartbeatMs } : {}),
-      agent: provider
-        ? new AgentService({
-            runs,
-            connections: connectionsRepository,
-            manifests: manifestsRepository,
-            knowledge,
-            settings,
-            executions,
-            tools: createAgentTools({
-              connections: connectionsRepository,
-              manifests: manifestsRepository,
-              knowledge,
-              search,
-              executor,
-              executions,
-              runs,
-            }),
-            provider,
-            runner: deps.agents ?? new AgentRunner(),
-            limits: agentLimits(env),
-          })
-        : null,
+      agent,
     }
+    // Routines run saved queries and questions, so they need the key like saved queries.
+    const dispatcher = deps.routineDispatcher ?? new RoutineDispatcher()
+    const routines = savedQueries
+      ? new RoutinesService({
+          routines: new RoutinesRepository(pool),
+          savedQueries: savedQueriesRepository,
+          savedQueryRuns: savedQueries,
+          agent,
+          connections: connectionsRepository,
+          workspaces,
+          settings,
+          dispatcher,
+          minIntervalMinutes: env.ROUTINE_MIN_INTERVAL_MINUTES,
+        })
+      : null
+    if (routines) dispatcher.attach(routines)
+    routinesDeps = { workspaces, auth, sessionSecret, routines }
   }
 
   app.disable("x-powered-by")
@@ -253,6 +281,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", queriesRouter(queriesDeps))
   app.use("/api/v1", savedQueriesRouter(savedQueriesDeps))
   app.use("/api/v1", dashboardsRouter(dashboardsDeps))
+  app.use("/api/v1", routinesRouter(routinesDeps))
   app.use("/api/v1", agentRouter(agentDeps))
 
   app.use(notFoundHandler)

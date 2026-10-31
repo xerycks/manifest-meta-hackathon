@@ -25,9 +25,9 @@ export interface AgentJob {
 /** Which limit refused a run. */
 export type AgentBusy = "conversation" | "user" | "workspace" | "process"
 
-/** A claimed place for a run: start it once it is recorded, or release it. */
+/** A claimed place for a run: start it once it is recorded (resolving when it is done), or release it. */
 export interface AgentSlot {
-  start(task: (signal: AbortSignal) => Promise<void>): void
+  start(task: (signal: AbortSignal) => Promise<void>): Promise<void>
   release(): void
 }
 
@@ -77,6 +77,7 @@ export class AgentRunner {
         active.done = task(active.controller.signal)
           .catch((error: unknown) => console.error(`Agent run ${job.runId} failed unexpectedly`, error))
           .finally(() => this.active.delete(job.runId))
+        return active.done
       },
       release: () => {
         if (!active.done) this.active.delete(job.runId)

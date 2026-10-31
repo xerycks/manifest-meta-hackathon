@@ -58,6 +58,7 @@ const PRIOR_CHARS = 16_000
 const CONVERSATION_FILES = 30
 const MUTATION_INDEX = "agent_runs_mutation_idx"
 const RETRY_INDEX = "agent_runs_retry_idx"
+const ROUTINE_CONVERSATION_INDEX = "conversations_routine_idx"
 
 export interface AgentLimits {
   maxSteps: number
@@ -140,6 +141,15 @@ function questionMessage(run: AgentRun, files: AttachmentSummary[]): string {
   ].join("\n")
 }
 
+/** A routine's run asked a clarification, which no one is there to answer. */
+function unanswerable(question: string): RunFailure {
+  const asked = question.length > 200 ? `${question.slice(0, 199)}…` : question
+  return new RunFailure(
+    "AGENT_NO_CLARIFICATION",
+    `This question was asked by a routine, so no one could answer the clarification it needed (“${asked}”). Make the routine's question specific enough to answer on its own.`,
+  )
+}
+
 /** What a run that ends without going on (cancelled or timed out while waiting) used, from its checkpoint. */
 function usedSoFar(run: AgentRun, checkpoint: RunCheckpoint | null) {
   return {
@@ -196,6 +206,8 @@ interface Job {
   deadline: RunDeadline
   /** Cancel, shutdown, or the deadline. */
   signal: AbortSignal
+  /** Asked by a routine: a clarification fails the run, since no one can answer it. */
+  unattended: boolean
 }
 
 /** What the model works with; it grows as the run goes. */
@@ -236,15 +248,7 @@ export class AgentService {
     if (sent) return { run: sent, created: false }
     const attachments = decodeAttachments(input.attachments ?? [])
     const connectionIds = input.connectionIds ?? []
-    if (connectionIds.length > 0) {
-      const known = new Set((await this.deps.connections.list(workspace.id)).map((source) => source.id))
-      const unknown = connectionIds.filter((id) => !known.has(id))
-      if (unknown.length > 0) {
-        throw AppError.validation("Some of the chosen sources do not exist in this workspace.", {
-          connectionIds: unknown,
-        })
-      }
-    }
+    await this.checkSources(workspace.id, connectionIds)
     if (
       input.conversationId &&
       !(await this.deps.runs.getConversation(workspace.id, userId, input.conversationId))
@@ -252,7 +256,7 @@ export class AgentService {
       throw AppError.notFound("Conversation not found")
     }
     try {
-      const run = await this.queue(workspace, {
+      const { run } = await this.queue(workspace, {
         id: randomUUID(),
         conversationId: input.conversationId ?? randomUUID(),
         ...(input.conversationId
@@ -273,6 +277,42 @@ export class AgentService {
         throw mutationTaken()
       }
       throw isUniqueViolation(error) ? conversationBusy() : error
+    }
+  }
+
+  /**
+   * Asks a routine's question as its owner, in the routine's conversation
+   * (started with `title` the first time). No one is there to answer, so a
+   * clarification fails the run. Resolves once the run is queued, with
+   * `finished`, which resolves with the run once its outcome is recorded.
+   */
+  async startForRoutine(
+    workspace: Workspace,
+    userId: string,
+    input: { routineId: string; title: string; question: string; connectionIds: string[] },
+  ): Promise<{ run: AgentRun; finished: Promise<AgentRun | null> }> {
+    await this.checkSources(workspace.id, input.connectionIds)
+    for (let attempt = 1; ; attempt += 1) {
+      const existing = await this.deps.runs.routineConversation(workspace.id, userId, input.routineId)
+      try {
+        const { run, done } = await this.queue(
+          workspace,
+          {
+            id: randomUUID(),
+            conversationId: existing ?? randomUUID(),
+            ...(existing ? {} : { newConversation: { title: input.title, routineId: input.routineId } }),
+            userId,
+            question: input.question,
+            connectionIds: input.connectionIds,
+          },
+          { unattended: true },
+        )
+        return { run, finished: done.then(() => this.deps.runs.getRun(workspace.id, userId, run.id)) }
+      } catch (error) {
+        // Another run of the routine started its conversation first: ask in that one.
+        if (attempt === 1 && isUniqueViolation(error, ROUTINE_CONVERSATION_INDEX)) continue
+        throw isUniqueViolation(error) ? conversationBusy() : error
+      }
     }
   }
 
@@ -306,7 +346,7 @@ export class AgentService {
       )
     }
     try {
-      const run = await this.queue(workspace, {
+      const { run } = await this.queue(workspace, {
         id: randomUUID(),
         conversationId: interrupted.conversationId,
         userId,
@@ -501,11 +541,15 @@ export class AgentService {
     )
   }
 
-  /** Records a queued run within the admission limits and starts answering it. */
+  /**
+   * Records a queued run within the admission limits and starts answering it;
+   * `done` resolves once its outcome is recorded.
+   */
   private async queue(
     workspace: Workspace,
     input: Omit<NewRun, "workspaceId" | "provider" | "model">,
-  ): Promise<AgentRun> {
+    options: { unattended?: boolean } = {},
+  ): Promise<{ run: AgentRun; done: Promise<void> }> {
     const { runs, provider } = this.deps
     const slot = this.claim(workspace.id, input.userId, input.id, input.conversationId)
     let run: AgentRun | null
@@ -525,8 +569,20 @@ export class AgentService {
       throw AppError.notFound("Conversation not found")
     }
     const queued = run
-    slot.start((signal) => this.execute(workspace, queued, signal))
-    return queued
+    const done = slot.start((signal) => this.execute(workspace, queued, signal, options.unattended ?? false))
+    return { run: queued, done }
+  }
+
+  /** 422 unless every chosen source exists in the workspace. */
+  private async checkSources(workspaceId: string, connectionIds: string[]): Promise<void> {
+    if (connectionIds.length === 0) return
+    const known = new Set((await this.deps.connections.list(workspaceId)).map((source) => source.id))
+    const unknown = connectionIds.filter((id) => !known.has(id))
+    if (unknown.length > 0) {
+      throw AppError.validation("Some of the chosen sources do not exist in this workspace.", {
+        connectionIds: unknown,
+      })
+    }
   }
 
   private claim(workspaceId: string, userId: string, runId: string, conversationId: string): AgentSlot {
@@ -556,12 +612,24 @@ export class AgentService {
     return new RunEvents(this.deps.runs, this.deps.runner.events, workspaceId, runId)
   }
 
-  private job(workspace: Workspace, run: AgentRun, events: RunEvents, runMs: number, stop: AbortSignal): Job {
+  private job(
+    workspace: Workspace,
+    run: AgentRun,
+    events: RunEvents,
+    runMs: number,
+    stop: AbortSignal,
+    unattended = false,
+  ): Job {
     const deadline = new RunDeadline(runMs, this.deps.limits.answerTimeoutMs)
-    return { workspace, run, events, deadline, signal: AbortSignal.any([stop, deadline.signal]) }
+    return { workspace, run, events, deadline, signal: AbortSignal.any([stop, deadline.signal]), unattended }
   }
 
-  private execute(workspace: Workspace, run: AgentRun, stop: AbortSignal): Promise<void> {
+  private execute(
+    workspace: Workspace,
+    run: AgentRun,
+    stop: AbortSignal,
+    unattended: boolean,
+  ): Promise<void> {
     const { runs, settings } = this.deps
     const job = this.job(
       workspace,
@@ -569,6 +637,7 @@ export class AgentService {
       this.eventsOf(workspace.id, run.id),
       this.deps.limits.runTimeoutMs,
       stop,
+      unattended,
     )
     return this.drive(job, async () => {
       const started = { provider: run.provider, model: run.model }
@@ -588,6 +657,7 @@ export class AgentService {
           },
           sources: formatSourceContext(context),
           today: new Date().toISOString().slice(0, 10),
+          unattended,
         }),
         files,
         messages: [...priorMessages(prior), { role: "user", text: questionMessage(run, files) }],
@@ -686,6 +756,7 @@ export class AgentService {
           result = { status: "completed", answer: outcome.answer }
           break
         }
+        if (job.unattended) throw unanswerable(outcome.question.request.question)
         waiting = true
         const answer = await this.waitForAnswer(job, state, outcome.question)
         waiting = false

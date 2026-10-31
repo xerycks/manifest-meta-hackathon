@@ -14,6 +14,7 @@ export type ErrorCode =
   | "INVALID_PARAMETERS"
   | "AGENT_NOT_CONFIGURED"
   | "AGENT_BUSY"
+  | "ROUTINE_BUSY"
   | "TOO_MANY_STREAMS"
   | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
@@ -132,6 +133,13 @@ export class AppError extends Error {
   /** Too many questions are being answered; the run was not started and may be retried. */
   static agentBusy(message: string, retryAfterSeconds: number): AppError {
     return new AppError(429, "AGENT_BUSY", message, { retryAfterSeconds }, {
+      "Retry-After": String(retryAfterSeconds),
+    })
+  }
+
+  /** This backend runs as many routine runs as it may; the run was not started and may be retried. */
+  static routineBusy(message: string, retryAfterSeconds: number): AppError {
+    return new AppError(429, "ROUTINE_BUSY", message, { retryAfterSeconds }, {
       "Retry-After": String(retryAfterSeconds),
     })
   }

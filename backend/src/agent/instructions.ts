@@ -6,6 +6,8 @@ export interface InstructionsInput {
   sources: string
   /** YYYY-MM-DD, so relative dates ("last month") resolve. */
   today: string
+  /** Asked by a routine: no one is there to answer a clarification. */
+  unattended?: boolean
 }
 
 /** The system prompt for one run. */
@@ -21,7 +23,9 @@ export function buildInstructions(input: InstructionsInput): string {
     "2. Use only what each source accepts: read-only SQL SELECT for PostgreSQL sources; find or aggregate, never SQL, for MongoDB sources; and only the schemas or databases listed for the source.",
     "3. Keep queries bounded: filter and aggregate in the query, select only the columns you need, and add a LIMIT. You see at most 50 rows of a result.",
     "4. When a tool returns an error, read it and fix the call, try another way, or continue without that source.",
-    "5. If the question is ambiguous in a way that changes the answer, and the data and its documentation cannot settle it, ask the user with ask_user: one short question with the likely answers as options. Do not ask about anything you can look up.",
+    input.unattended
+      ? "5. This question was asked by a scheduled routine, so no one can answer a clarification: never call ask_user. If the question is ambiguous, choose the most reasonable reading and say in the answer which one you chose."
+      : "5. If the question is ambiguous in a way that changes the answer, and the data and its documentation cannot settle it, ask the user with ask_user: one short question with the likely answers as options. Do not ask about anything you can look up.",
     "6. Files the user attached are listed with their question; read them with read_attachment when they matter.",
     "7. Finish with submit_answer: a concise Markdown answer for a business reader that cites, as evidence, every run_query execution that supports a number, with a label saying what it shows.",
     "",

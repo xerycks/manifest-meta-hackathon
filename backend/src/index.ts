@@ -7,6 +7,8 @@ import { ManifestsRepository } from "./manifests/repository.js"
 import { RefreshRunner } from "./manifests/runner.js"
 import { QueryExecutionsRepository } from "./queries/repository.js"
 import { QueryRunner } from "./queries/runner.js"
+import { RoutineDispatcher } from "./routines/dispatcher.js"
+import { RoutinesRepository } from "./routines/repository.js"
 import { createApp } from "./server/app.js"
 import { createPool } from "./shared/postgres/client.js"
 import { runMigrations } from "./storage/migrations.js"
@@ -26,6 +28,8 @@ if (pool) {
     console.warn(`Marked ${runs.interrupted} agent run(s) as interrupted (retryable).`)
   if (runs.expired > 0)
     console.warn(`Stopped ${runs.expired} agent run(s) whose clarification went unanswered.`)
+  const routineRuns = await new RoutinesRepository(pool).recoverAfterRestart()
+  if (routineRuns > 0) console.warn(`Marked ${routineRuns} routine run(s) as interrupted (not retried).`)
   if (!env.CONNECTION_ENCRYPTION_KEY) {
     console.warn("CONNECTION_ENCRYPTION_KEY is not set — source connection endpoints will return 503.")
   }
@@ -43,7 +47,17 @@ const refreshes = new RefreshRunner()
 const queries = new QueryRunner()
 const agents = new AgentRunner()
 const dashboardRefreshes = new DashboardRefresher()
-const app = createApp(env, { pool, sources, refreshes, queries, agents, dashboardRefreshes })
+const routineDispatcher = new RoutineDispatcher({ intervalMs: env.ROUTINE_POLL_INTERVAL_MS })
+const app = createApp(env, {
+  pool,
+  sources,
+  refreshes,
+  queries,
+  agents,
+  dashboardRefreshes,
+  routineDispatcher,
+})
+if (pool) routineDispatcher.start()
 
 const server = app.listen(env.PORT, env.HOST, () => {
   console.log(`manifest-backend listening on http://${env.HOST}:${env.PORT}`)
@@ -51,13 +65,17 @@ const server = app.listen(env.PORT, env.HOST, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    // Running refreshes, queries, and agent runs stop now and record why; pools close once they have.
-    const stopped = Promise.all([
-      refreshes.shutdown(),
-      dashboardRefreshes.shutdown(),
-      queries.shutdown(),
-      agents.shutdown(),
-    ])
+    // Routines stop being claimed first; then running refreshes, queries, and agent runs stop
+    // and record why (routine runs too, once theirs have); pools close once they have.
+    const stopped = routineDispatcher.stop().then(() =>
+      Promise.all([
+        refreshes.shutdown(),
+        dashboardRefreshes.shutdown(),
+        queries.shutdown(),
+        agents.shutdown(),
+        routineDispatcher.drained(),
+      ]),
+    )
     server.close(() => {
       void stopped
         .then(() => Promise.allSettled([closeSourceAdapters(sources), pool?.end()]))
