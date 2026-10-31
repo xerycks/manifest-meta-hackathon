@@ -41,6 +41,16 @@ export class AppError extends Error {
     return new AppError(409, "CONFLICT", message, details)
   }
 
+  /** A save based on an outdated version; `current` lets the editor show the newer one. */
+  static stale(thing: string, current: unknown): AppError {
+    return new AppError(
+      409,
+      "CONFLICT",
+      `Someone else saved changes to this ${thing} after you opened it. Review their version, then save again.`,
+      { current },
+    )
+  }
+
   static unauthorized(message = "Sign in to continue"): AppError {
     return new AppError(401, "UNAUTHORIZED", message)
   }

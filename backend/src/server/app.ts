@@ -18,10 +18,17 @@ import { CredentialSealer } from "../connections/credentials.js"
 import { ConnectionsRepository } from "../connections/repository.js"
 import { connectionsRouter, type ConnectionsDeps } from "../connections/routes.js"
 import { ConnectionsService } from "../connections/service.js"
+import { KnowledgeRepository } from "../knowledge/repository.js"
+import { knowledgeRouter, type KnowledgeDeps } from "../knowledge/routes.js"
+import { KnowledgeService } from "../knowledge/service.js"
+import { ManifestEditsRepository } from "../manifests/editor-repository.js"
+import { ManifestEditorService } from "../manifests/editor-service.js"
 import { ManifestsRepository } from "../manifests/repository.js"
 import { manifestsRouter, type ManifestsDeps } from "../manifests/routes.js"
 import { RefreshRunner } from "../manifests/runner.js"
 import { ManifestsService } from "../manifests/service.js"
+import { SearchRepository } from "../search/repository.js"
+import { searchRouter, type SearchDeps } from "../search/routes.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
 import { ok } from "../shared/http/respond.js"
 import { WorkspacesRepository, WorkspaceSettingsRepository } from "../workspaces/repository.js"
@@ -56,6 +63,8 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let authDeps: AuthDeps | null = null
   let connectionsDeps: ConnectionsDeps | null = null
   let manifestsDeps: ManifestsDeps | null = null
+  let knowledgeDeps: KnowledgeDeps | null = null
+  let searchDeps: SearchDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
     const workspaces = new WorkspacesRepository(pool)
@@ -83,9 +92,10 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       sessionSecret,
       google,
     }
+    const connectionsRepository = new ConnectionsRepository(pool)
     const connections = env.CONNECTION_ENCRYPTION_KEY
       ? new ConnectionsService(
-          new ConnectionsRepository(pool),
+          connectionsRepository,
           new CredentialSealer(env.CONNECTION_ENCRYPTION_KEY),
           deps.sources ?? createSourceAdapters(),
         )
@@ -105,7 +115,21 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       // New sources and changed schema selections are discovered right away.
       ...(manifests ? { onSourceSaved: manifests.refreshAfterSave.bind(manifests) } : {}),
     }
-    manifestsDeps = { workspaces, auth, sessionSecret, manifests }
+    manifestsDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      manifests,
+      editor: manifests ? new ManifestEditorService(new ManifestEditsRepository(pool)) : null,
+    }
+    // Knowledge and search read only application storage, so they work without the key.
+    knowledgeDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      knowledge: new KnowledgeService(new KnowledgeRepository(pool), connectionsRepository),
+    }
+    searchDeps = { workspaces, auth, search: new SearchRepository(pool) }
   }
 
   app.disable("x-powered-by")
@@ -130,6 +154,8 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", workspacesRouter(workspaceDeps))
   app.use("/api/v1", connectionsRouter(connectionsDeps))
   app.use("/api/v1", manifestsRouter(manifestsDeps))
+  app.use("/api/v1", knowledgeRouter(knowledgeDeps))
+  app.use("/api/v1", searchRouter(searchDeps))
 
   app.use(notFoundHandler)
   app.use(errorHandler)

@@ -43,3 +43,8 @@ export function currentWorkspace(req: Request): Workspace {
   if (!req.workspace) throw AppError.notFound("Workspace not found")
   return req.workspace
 }
+
+export function currentRole(req: Request): WorkspaceRole {
+  if (!req.workspaceRole) throw AppError.notFound("Workspace not found")
+  return req.workspaceRole
+}

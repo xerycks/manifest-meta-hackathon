@@ -1,5 +1,6 @@
 import { z } from "zod"
 
+import type { Author } from "../auth/repository.js"
 import type { DiscoveryPhase, ManifestObjectKind } from "../connections/adapters/types.js"
 
 export type RefreshStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled"
@@ -38,6 +39,7 @@ export interface ManifestObjectSummary {
   id: string
   schema: string
   name: string
+  label: string | null
   kind: ManifestObjectKind
   columnCount: number
   estimatedRows: number | null
@@ -68,10 +70,21 @@ export interface ManifestObject {
   removedAt: string | null
   firstSeenAt: string
   lastSeenAt: string
+  // Authored meaning; refreshes never change it.
+  label: string | null
+  /** Markdown. */
+  description: string | null
+  /** What one row represents, e.g. "one row per order line". */
+  rowMeaning: string | null
+  /** Increases with every edit; a save names the version it started from. */
+  version: number
+  editedAt: string | null
+  editedBy: Author | null
 }
 
 export interface ManifestColumn {
   id: string
+  objectId: string
   name: string
   ordinal: number
   dataType: string
@@ -82,6 +95,16 @@ export interface ManifestColumn {
   comment: string | null
   present: boolean
   removedAt: string | null
+  // Authored meaning; refreshes never change it.
+  label: string | null
+  /** Markdown. */
+  description: string | null
+  unit: string | null
+  /** Allowed or example values. */
+  valueNotes: string | null
+  version: number
+  editedAt: string | null
+  editedBy: Author | null
 }
 
 export interface RelationshipEnd {
@@ -96,9 +119,14 @@ export interface ManifestRelationship {
   id: string
   origin: "foreign_key" | "manual"
   constraintName: string | null
+  /** Discovered foreign keys only; manual relationships are never marked missing. */
   present: boolean
   from: RelationshipEnd
   to: RelationshipEnd
+  remark: string | null
+  version: number
+  /** A manual relationship whose objects or columns are no longer in the source. */
+  needsReview: boolean
 }
 
 export interface ManifestObjectDetail {

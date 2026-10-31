@@ -1,6 +1,7 @@
 import { DiscoveryLimitExceeded, SourceConnectionError } from "../connections/adapters/types.js"
 import type { ConnectionsService } from "../connections/service.js"
 import { AppError } from "../shared/http/errors.js"
+import { isUniqueViolation } from "../shared/postgres/errors.js"
 import type { ManifestsRepository, RunRef } from "./repository.js"
 import type { RefreshRunner, StopReason } from "./runner.js"
 import type {
@@ -14,15 +15,6 @@ import type {
 export const MAX_REFRESH_MINUTES = 3
 /** Objects listed per manifest request; a search narrows larger manifests. */
 export const MAX_LISTED_OBJECTS = 2_500
-
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "23505"
-  )
-}
 
 const UNEXPECTED_FAILURE =
   "The refresh failed unexpectedly. Try again; if it keeps failing, check the backend logs."

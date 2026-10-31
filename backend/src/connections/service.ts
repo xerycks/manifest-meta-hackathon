@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import { AppError } from "../shared/http/errors.js"
+import { isUniqueViolation } from "../shared/postgres/errors.js"
 import {
   SourceConnectionError,
   type DiscoveredMetadata,
@@ -22,15 +23,6 @@ import type {
 } from "./schemas.js"
 
 export const MAX_CONNECTIONS_PER_WORKSPACE = 50
-
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "23505"
-  )
-}
 
 function secretFrom(password: string | undefined): SourceSecret {
   return password ? { password } : {}

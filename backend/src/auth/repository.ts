@@ -12,6 +12,19 @@ interface UserRow {
   name: string
 }
 
+/** How a member is shown next to something they wrote. */
+export interface Author {
+  id: string
+  name: string
+}
+
+/** SQL for an author's display name (their email when they have no name) from a users alias. */
+export const authorNameSql = (alias: string) => `coalesce(nullif(${alias}.name, ''), ${alias}.email)`
+
+export function toAuthor(id: string | null, name: string | null): Author | null {
+  return id !== null && name !== null ? { id, name } : null
+}
+
 export class UsersRepository {
   constructor(private readonly pool: Pool) {}
 

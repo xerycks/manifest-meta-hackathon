@@ -8,6 +8,20 @@ import { ok } from "../shared/http/respond.js"
 import { validate } from "../shared/http/validate.js"
 import { currentWorkspace, MANAGER_ROLES, requireMembership } from "../workspaces/access.js"
 import type { WorkspacesRepository } from "../workspaces/repository.js"
+import type { ManifestScope } from "./editor-repository.js"
+import {
+  columnPatchSchema,
+  columnParamsSchema,
+  createRelationshipSchema,
+  objectPatchSchema,
+  relationshipParamsSchema,
+  updateRelationshipSchema,
+  type ColumnPatch,
+  type CreateRelationshipInput,
+  type ObjectPatch,
+  type UpdateRelationshipInput,
+} from "./editor-schemas.js"
+import type { ManifestEditorService } from "./editor-service.js"
 import {
   browseQuerySchema,
   connectionParamsSchema,
@@ -23,13 +37,21 @@ export interface ManifestsDeps {
   sessionSecret: string
   /** Null when CONNECTION_ENCRYPTION_KEY is missing: routes answer 503. */
   manifests: ManifestsService | null
+  /** Authored meaning; present whenever `manifests` is. */
+  editor: ManifestEditorService | null
 }
 
+type IdParam = "connectionId" | "refreshId" | "objectId" | "columnId" | "relationshipId"
+
 /** Ids from params that validate() has already checked. */
-function param(req: Request, name: "connectionId" | "refreshId" | "objectId"): string {
+function param(req: Request, name: IdParam): string {
   const value = req.params[name]
   if (!value) throw AppError.badRequest(`Missing ${name}`)
   return value
+}
+
+function scopeOf(req: Request): ManifestScope {
+  return { workspaceId: currentWorkspace(req).id, connectionId: param(req, "connectionId") }
 }
 
 export function manifestsRouter(deps: ManifestsDeps | null): Router {
@@ -47,8 +69,9 @@ export function manifestsRouter(deps: ManifestsDeps | null): Router {
   const member = requireMembership(deps.workspaces)
   const manager = requireMembership(deps.workspaces, MANAGER_ROLES)
   const service = deps.manifests
+  const editor = deps.editor
 
-  if (!service) {
+  if (!service || !editor) {
     router.use(
       base,
       auth,
@@ -147,6 +170,75 @@ export function manifestsRouter(deps: ManifestsDeps | null): Router {
           param(req, "refreshId"),
         ),
       )
+    }),
+  )
+
+  // Authored meaning (owners and admins) -----------------------------------
+
+  router.patch(
+    `${base}/objects/:objectId`,
+    auth,
+    csrf,
+    validate("params", objectParamsSchema),
+    manager,
+    validate("body", objectPatchSchema),
+    asyncHandler(async (req, res) => {
+      const input = req.body as ObjectPatch
+      const userId = currentUser(req).id
+      ok(res, await editor.updateObject(scopeOf(req), param(req, "objectId"), input, userId))
+    }),
+  )
+
+  router.patch(
+    `${base}/columns/:columnId`,
+    auth,
+    csrf,
+    validate("params", columnParamsSchema),
+    manager,
+    validate("body", columnPatchSchema),
+    asyncHandler(async (req, res) => {
+      const input = req.body as ColumnPatch
+      const userId = currentUser(req).id
+      ok(res, await editor.updateColumn(scopeOf(req), param(req, "columnId"), input, userId))
+    }),
+  )
+
+  router.post(
+    `${base}/relationships`,
+    auth,
+    csrf,
+    validate("params", connectionParamsSchema),
+    manager,
+    validate("body", createRelationshipSchema),
+    asyncHandler(async (req, res) => {
+      const input = req.body as CreateRelationshipInput
+      ok(res, await editor.createRelationship(scopeOf(req), input, currentUser(req).id), 201)
+    }),
+  )
+
+  router.patch(
+    `${base}/relationships/:relationshipId`,
+    auth,
+    csrf,
+    validate("params", relationshipParamsSchema),
+    manager,
+    validate("body", updateRelationshipSchema),
+    asyncHandler(async (req, res) => {
+      const input = req.body as UpdateRelationshipInput
+      const id = param(req, "relationshipId")
+      ok(res, await editor.updateRelationship(scopeOf(req), id, input, currentUser(req).id))
+    }),
+  )
+
+  router.delete(
+    `${base}/relationships/:relationshipId`,
+    auth,
+    csrf,
+    validate("params", relationshipParamsSchema),
+    manager,
+    asyncHandler(async (req, res) => {
+      await editor.deleteRelationship(scopeOf(req), param(req, "relationshipId"))
+      ok(res, { deleted: true })
     }),
   )
 
