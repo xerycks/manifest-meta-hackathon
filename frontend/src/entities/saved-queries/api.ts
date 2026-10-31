@@ -17,7 +17,7 @@ import type {
 const PAGE_SIZE = 50
 const RUNS_PAGE_SIZE = 10
 
-const savedQueriesKey = (workspaceId: string | null) => ["saved-queries", workspaceId] as const
+export const savedQueriesKey = (workspaceId: string | null) => ["saved-queries", workspaceId] as const
 const savedQueryKey = (workspaceId: string | null, id: string) =>
   [...savedQueriesKey(workspaceId), "item", id] as const
 
@@ -56,7 +56,7 @@ export function useSavedQueries(workspaceId: string | null, search: string, conn
 export function useSavedQuery(workspaceId: string | null, id: string) {
   return useQuery({
     queryKey: savedQueryKey(workspaceId, id),
-    enabled: workspaceId !== null,
+    enabled: workspaceId !== null && id !== "",
     queryFn: ({ signal }) =>
       apiRequest<SavedQueryDetail>(itemPath(workspaceId as string, id), { signal, workspaceId }),
     retry: retryServerErrors,

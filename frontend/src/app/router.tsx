@@ -22,7 +22,7 @@ const NewSourcePage = lazy(() =>
 const EditSourcePage = lazy(() =>
   import("@/pages/sources/EditSourcePage.tsx").then((module) => ({ default: module.EditSourcePage })),
 )
-// The ask screen, query runs, and saved queries load when first opened.
+// The ask screen, query runs, saved queries, and dashboards load when first opened.
 const AskPage = lazy(() => import("@/pages/ask/AskPage.tsx").then((module) => ({ default: module.AskPage })))
 const ExecutionPage = lazy(() =>
   import("@/pages/sources/ExecutionPage.tsx").then((module) => ({ default: module.ExecutionPage })),
@@ -32,6 +32,12 @@ const SavedQueriesPage = lazy(() =>
 )
 const SavedQueryPage = lazy(() =>
   import("@/pages/saved/SavedQueryPage.tsx").then((module) => ({ default: module.SavedQueryPage })),
+)
+const DashboardsPage = lazy(() =>
+  import("@/pages/dashboards/DashboardsPage.tsx").then((module) => ({ default: module.DashboardsPage })),
+)
+const DashboardPage = lazy(() =>
+  import("@/pages/dashboards/DashboardPage.tsx").then((module) => ({ default: module.DashboardPage })),
 )
 
 function Lazy({ children }: { children: ReactNode }) {
@@ -89,16 +95,8 @@ export const router = createBrowserRouter([
           { path: "manifests/:connectionId/objects/:objectId", element: <ManifestBrowserPage /> },
           { path: "saved", element: <Lazy><SavedQueriesPage /></Lazy> },
           { path: "saved/:savedQueryId", element: <Lazy><SavedQueryPage /></Lazy> },
-          {
-            path: "dashboards",
-            element: (
-              <PlaceholderPage
-                title="Dashboards"
-                emptyTitle="No dashboards yet"
-                description="Pin saved results as numbers, tables, and charts that refresh from the same checked queries."
-              />
-            ),
-          },
+          { path: "dashboards", element: <Lazy><DashboardsPage /></Lazy> },
+          { path: "dashboards/:dashboardId", element: <Lazy><DashboardPage /></Lazy> },
           {
             path: "routines",
             element: (

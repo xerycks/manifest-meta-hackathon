@@ -13,6 +13,7 @@ import {
   PARAMETER_TYPE_LABELS,
 } from "@/entities/saved-queries/parameters.ts"
 import type { SavedQueryDetail } from "@/entities/saved-queries/types.ts"
+import { AddToDashboardButton } from "@/features/dashboard/AddToDashboardButton.tsx"
 import { RunHistory } from "@/features/saved-query/RunHistory.tsx"
 import { RunPanel } from "@/features/saved-query/RunPanel.tsx"
 import { SavedQueryEditor } from "@/features/saved-query/SavedQueryEditor.tsx"
@@ -65,7 +66,8 @@ function DeleteSavedQuery({
       <p className="text-sm">
         Delete “{savedQuery.name}”
         {savedQuery.visibility === "workspace" ? " for everyone in this workspace" : ""}? Its earlier runs stay in
-        the source's history until they are pruned. This cannot be undone.
+        the source's history until they are pruned, and dashboard panels that show it will say it was removed.
+        This cannot be undone.
       </p>
       <div className="flex flex-wrap gap-2">
         <Button
@@ -268,6 +270,7 @@ function SavedQueryView({ savedQueryId }: { savedQueryId: string }) {
             <ResultNotice key={warning.code}>{warning.message}</ResultNotice>
           ))}
           <div className="flex flex-wrap items-center gap-2">
+            <AddToDashboardButton workspaceId={session.workspaceId} savedQuery={data} />
             {canChange ? (
               <>
                 <Button
