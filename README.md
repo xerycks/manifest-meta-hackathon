@@ -1,7 +1,8 @@
 # Manifest
 
-Manifest connects data sources, documents what their tables and columns mean, and answers
-questions with the queries and rows behind every answer.
+Manifest connects data sources, documents what their tables and columns mean, answers questions
+with the queries and rows behind every answer, and turns answers into saved queries, dashboards,
+and scheduled routines.
 
 The repository is a monorepo:
 
@@ -37,9 +38,9 @@ every backend variable. Real environment files and credentials are never committ
 
 ## Application storage
 
-Manifest keeps its own data (workspaces, members, sources, manifests, query runs, and
-conversations) in a PostgreSQL application database, separate from the databases you connect as
-sources.
+Manifest keeps its own data (workspaces, members, sources, manifests, query runs, conversations,
+saved queries, dashboards, and routines) in a PostgreSQL application database, separate from the
+databases you connect as sources.
 
 ```sh
 createdb manifest
@@ -226,7 +227,10 @@ ones.
   `pg_terminate_backend`, `pg_notify`, `query_to_xml`, `ts_stat`, …). Allowed queries run in a
   `READ ONLY` transaction with `statement_timeout`, `lock_timeout`,
   `idle_in_transaction_session_timeout`, and `search_path` set to the selected schemas, through the
-  extended protocol and a cursor, and are rolled back.
+  extended protocol and a cursor, and are rolled back. A query may carry `params` (at most 100
+  values of up to 1,000 characters, 50 KB together), bound to `$1..$n` by position and never
+  written into the SQL; the SQL must use each of them and no others (the agent's `run_query` takes
+  queries without them, so evidence shows, exports, and saves its query as written).
 - **MongoDB**: `find` (filter, projection, sort, skip) or `aggregate` (pipeline) on a selected
   database. Values may use relaxed Extended JSON (`{"$date": "…"}`, `{"$oid": "…"}`,
   `{"$numberLong": "…"}`). Stages must be on the allowlist; `$out`, `$merge`, `$where`, `$function`,
@@ -246,7 +250,8 @@ ones.
   reason and the offending name).
 - **Records**: every run keeps its query, limits, outcome, and up to 1,000 rows (2 MB) of its result
   as evidence. Any member can open a run by id; the 200 most recent runs per workspace are kept,
-  plus every run an answer cites, and a backend restart marks runs it left running as failed.
+  plus every run an answer cites and each saved query's latest result, and a backend restart marks
+  runs it left running as failed.
 
 **Result format** (the same for every engine): `{ columns: [{ name, type, kind }], rows, rowCount,
 truncated, truncatedBy, durationMs }`. Rows are arrays in column order, so duplicate names
@@ -376,6 +381,182 @@ Run events, numbered per run: `run.started`, `tool.started {callId, tool, summar
 answer}`, `answer.completed {answer}`, `run.failed {code, message}`, `run.cancelled`, and
 `run.interrupted {code, message, disposition}`.
 
+## Saved queries and exports
+
+Any member turns a useful query into a saved query: **Save as query** on an answer's evidence
+(prefilled with what it supports, its source, and its query; the answer is kept as its origin) or,
+for owners and admins, from a source's query console. A saved query has a name (unique per
+workspace), a Markdown description, its source and query, optional date parameters, and a
+visibility: everyone in the workspace, or only its creator (others get `404`). Everyone it is
+visible to reopens it at `/saved/:savedQueryId` and runs it; its creator or an owner or admin
+edits or deletes it. Private hides the saved query itself (its definition, list and search entry,
+run route, and run history); its runs are query runs like any other, so, as with an answer's
+evidence, a member who has a run's id can open or export it, and owners and admins see it in the
+source's query history. Names are unique across private ones too, so a `409` tells that a name is
+taken without showing the saved query. Saving checks the query with the source's validators
+without running it, and edits name the version they started from (`409 CONFLICT` with the current
+record when someone saved in between; the editor keeps your draft).
+
+- **Reruns carry today's permissions**: every run goes through the [read query](#read-queries)
+  executor as the person running it (origin `saved_query`), so the source's current schemas,
+  validators, limits, and admission apply (`429 QUERY_BUSY` passes through). A deselected schema
+  gives `422 QUERY_REJECTED` naming the table; removing a source removes its saved queries.
+- **Date parameters**: `date` or `datetime` parameters with a fixed default (`2026-10-01`,
+  `2026-10-01T09:30`) or a relative one (`today`, `yesterday`, `start_of_week` (Monday),
+  `start_of_month`, `start_of_quarter`, `start_of_year`, `days_ago:N`, `months_ago:N`), resolved
+  when the query runs in the workspace time zone (**Settings → Time zone**, UTC by default). A
+  datetime parameter starts at its day's first instant there (DST gaps move forward, repeated
+  times take the first) and is sent with that offset; a `date` parameter is sent as a calendar
+  date, which PostgreSQL compares with a `timestamptz` column at midnight in the source session's
+  time zone, so use `datetime` parameters for timestamps. SQL writes them as `{{name}}`, sent as
+  bind parameters (`$1..$n`), never written into the SQL (a saved query cannot carry `params` of
+  its own); MongoDB writes `{"$param": "name"}` in filter or pipeline values, replaced
+  by dates. Unknown, unused, missing, or invalid parameters give `422 INVALID_PARAMETERS` naming
+  them. Every run returns and records the values it resolved to. Queries that read the database
+  clock (`now()`, `current_date`, `$$NOW`, …) save with a warning, since their rows depend on when
+  they run and on the source's time zone.
+- **Results and history**: the latest succeeded run stays pinned, so its stored result opens with
+  the saved query; the run history lists every run with its parameter values (older runs follow
+  the workspace's history pruning).
+- **CSV**: any run a member may open (console, evidence, saved query) downloads as CSV with
+  `GET …/connections/:connectionId/queries/:executionId/export.csv`: the stored rows in result
+  column order, RFC 4180 with CRLF and a UTF-8 byte order mark, exact numbers and ISO dates as
+  stored, empty cells for `NULL` and missing MongoDB fields, and text starting with `=`, `+`, `-`,
+  `@`, a tab, or CR prefixed with `'` so spreadsheets do not run it (plain numbers such as `-12.50`
+  stay as they are). A result cut by its row or size limit, or by the stored snapshot, sends
+  `X-Manifest-Truncated` (`rows`, `bytes`, `snapshot`) and a `-partial` file name. **Download
+  CSV** in the app names the file after the saved query or evidence and its day, and a download
+  that fails says why instead of saving the error.
+- **Answers as Markdown**: `GET …/agent/runs/:runId/export.md` downloads an answer (its text, what
+  the data could not tell, and each cited query with its rows) for the user who asked.
+
+| Route (under `/api/v1/workspaces/:workspaceId/saved-queries`) | |
+| --- | --- |
+| `GET /?search=&connectionId=&limit=&offset=` | Saved queries you may see, with `nextOffset` |
+| `POST /` `{name, description?, connectionId, query, parameters?, visibility?, origin?}` | `201` with the saved query |
+| `GET /:id` | The saved query with its resolved defaults, warnings, time zone, and `latestRun` |
+| `PATCH /:id` `{version, name?, description?, query?, parameters?, visibility?}` | Creator, owners, admins |
+| `DELETE /:id` | Creator, owners, admins |
+| `POST /:id/run` `{parameters?: {name: value}}` | `{execution, parameters, timeZone}` |
+| `GET /:id/runs?limit=&offset=` | Its runs, newest first, with `nextOffset` |
+
+## Dashboards
+
+A dashboard is a named set of panels on a 12-column grid (at most 30 panels; a workspace has at
+most 200 dashboards, with names unique regardless of case). Any member creates one on
+**Dashboards** or with **Add to dashboard** on a saved query. Like saved queries, a dashboard is
+visible to everyone in the workspace or only to its creator: a private dashboard is `404` for
+everyone else, workspace owners and admins included. Its creator or an owner or admin renames it,
+edits its Markdown description and visibility, adds, edits, duplicates, moves, resizes, and removes
+panels, and deletes it; other members view and refresh it. Edits name the version they started
+from (`409 CONFLICT` with the current record).
+
+- **Panels**: a **number** shows one column of the first row (formatted as a number, a currency,
+  or a percent of a ratio, with up to 10 decimal places), and optionally its difference from a
+  comparison column; numerics are formatted from their exact digits, never through a float. A
+  **table** shows the result's columns, or a chosen subset in a chosen order. A **Markdown** panel
+  shows up to 4,000 characters of text. A **bar** or **line** chart plots up to 5 columns of
+  values against an x column (bars side by side or stacked, in result order, by x, or by value; a
+  line follows a date or number axis), a **gauge** shows one value between a minimum and a maximum
+  with up to 4 good, warning, or critical thresholds, a **ticker** shows a row of labelled values
+  with an optional change, and a **Sankey** diagram draws flows from a source column to a target
+  column as wide as a value column. Columns a panel names must be in the saved query's latest
+  result when it has one (`422` naming the column; values must be columns of numbers). Every chart
+  has a summary for screen readers, exact values in its tooltips, and **View as table**.
+- **Layout**: editors drag a panel by its handle and resize it from its corner, or focus the handle
+  and use the arrow keys (Shift resizes); panels in the way move down and gaps close up. Each kind
+  has a minimum size, and new panels go below the others. Every change saves the whole layout with
+  its own `layoutVersion`: overlapping, off-grid, or too-small boxes get `422`, and a stale version
+  or a changed set of panels gets `409`. On a narrow screen (under 640 px) the panels stack in one
+  column, top to bottom and then left to right, and do not move.
+- **Results**: query panels show their saved query's latest succeeded run (its pinned stored
+  result), when it ran, and the parameter values it ran with, since a routine or a rerun may have
+  used values other than the defaults. A panel carries only what it shows: 1 row for a number or
+  gauge, 100 for a table (128 KB), 50 for a ticker (128 KB), and 1,000 for a bar, line, or Sankey
+  chart (256 KB). Bar charts draw the 25 largest categories plus “Other” and Sankey diagrams the 50
+  largest flows (loops left out), with a note saying so, as for a result the query's own row limit
+  cut. Dashboards read stored results only, so they open without `CONNECTION_ENCRYPTION_KEY`.
+- **Refresh**: **Refresh all** (with progress and **Cancel refresh**) or a panel's **Refresh** runs
+  the saved queries with their defaults as the person refreshing (origin `dashboard`, so the
+  source's validators, limits, and admission apply). Each saved query runs once however many
+  panels, dashboards, or viewers ask for it meanwhile, and a refresh runs 2 at a time; `429
+  QUERY_BUSY` is retried with backoff for up to a minute, and cancelling stops only the runs no
+  other refresh still waits for. Refresh all skips Markdown panels, removed or private saved
+  queries, and saved queries that need parameter values (**Run with values** opens their page).
+  Each panel says whether it is fresh, refreshing, failed (and why), or cancelled; a failed panel
+  keeps its last good result. Refreshes are coordinated within one backend process.
+- **Saved queries and privacy**: a panel uses a saved query its editor can see, and a private
+  saved query only on a private dashboard. If a saved query is made private later, its panels show
+  that it is private to everyone but its creator, without its name, id, or rows. Deleting a saved
+  query, or the source it reads, keeps its panels, which then say the saved query was removed until
+  someone picks another one or removes them.
+
+| Route (under `/api/v1/workspaces/:workspaceId/dashboards`) | |
+| --- | --- |
+| `GET /` | Dashboards you may see, recently updated first, with panel counts |
+| `POST /` `{name, description?, visibility?}` | `201` with the dashboard |
+| `GET /:id` | The dashboard with its panels, each query panel's latest result and status, and any refresh under way |
+| `PATCH /:id` `{version, name?, description?, visibility?}` | Creator, owners, admins |
+| `DELETE /:id` | Creator, owners, admins; the saved queries stay |
+| `POST /:id/panels` `{kind, title?, savedQueryId?, config}` | `201` with the panel, placed below the others |
+| `PATCH /:id/panels/:panelId` `{version, kind?, title?, savedQueryId?, config?}` | The panel, checked as a whole |
+| `DELETE /:id/panels/:panelId` | Removes the panel |
+| `PUT /:id/layout` `{version, boxes: [{panelId, x, y, w, h}]}` | Every panel once; the dashboard with its new `layoutVersion` |
+| `GET /:id/refresh` | Whether a refresh is under way, and each panel's status |
+| `POST /:id/refresh` `{panelIds?}` | `202`: refreshes every panel, or the ones listed, joining a refresh under way |
+| `DELETE /:id/refresh` | Cancels the refresh once its runs have stopped |
+
+## Routines
+
+A routine runs a saved query (with values for its date parameters) or asks a question, on a
+schedule and on demand, as its owner: the member who created it. Any member creates routines on
+**Routines** or with **Create routine** on a saved query, and sees every routine of the workspace
+and how its runs went; the owner or a workspace owner or admin edits, pauses, resumes, runs, and
+deletes it (others get `403`, non-members `404`). A workspace has at most 100 routines, with names
+unique regardless of case. Results stay in Manifest (`delivery: {channel: "in_app"}`).
+
+- **Schedules** are 5-field cron (minute, hour, day of month, month, day of week) read in an IANA
+  time zone, the workspace's unless chosen, and described in plain words. Runs must be at least
+  `ROUTINE_MIN_INTERVAL_MINUTES` apart (default 5). A time that a spring-forward gap skips runs at
+  the first minute after it; a time that a fall-back overlap repeats runs once. Relative parameter
+  values (“yesterday”) resolve in the routine's time zone when it runs.
+- **Dispatch**: every backend claims due routines every `ROUTINE_POLL_INTERVAL_MS` (default 15 s)
+  with `SELECT … FOR UPDATE SKIP LOCKED`, records the run for the slot (unique per routine and
+  slot), and moves the next run on in the same transaction, then runs at most 4 at a time per
+  backend. So several backends on one database never run a slot twice. After downtime a routine
+  runs once, for the latest slot that came, and notes the skipped slots in a single skipped run.
+  Pausing clears the next run; resuming schedules the next slot after now, without running the
+  ones missed.
+- **Runs** act as the owner: saved queries through their run route (origin `routine`, so the
+  source's validators, limits, and admission apply, and the saved query keeps the result as its
+  latest), questions as an agent run in the routine's own conversation (“Routine: name”, marked in
+  the Ask list and private to the owner). Nobody can answer a routine's clarification, so asking one
+  fails the run. Refused runs (`429`) retry for up to a minute. A run fails with a reason when the
+  owner left the workspace, the saved query was deleted or made private by someone else, or a
+  source is gone; three failures in a row pause the routine (`pausedReason: "failures"`), as does a
+  stored schedule that can no longer be read. Every member sees each run's outcome, but the link to
+  the result of a saved query private to someone else only shows to the routine's owner.
+- **Restarts**: on shutdown the dispatcher stops claiming before the runners stop; a run they stop
+  is `interrupted`. At startup, runs left queued or running become `interrupted` (this assumes all
+  backends restart together). Interrupted runs are never retried automatically, so a restart
+  repeats no work. Each routine keeps its latest 1,000 finished runs.
+- **Run now** takes a client-chosen `mutationId`: sending it again returns the run it started. It
+  works while paused and leaves the schedule alone. A backend already running 4 routine runs
+  refuses another with `429 ROUTINE_BUSY` (and `Retry-After`), so manual runs cannot crowd out
+  scheduled ones.
+
+| Route (under `/api/v1/workspaces/:workspaceId/routines`) | |
+| --- | --- |
+| `GET /` | Every routine, with its schedule in words, next run, and last status |
+| `POST /` `{name, description?, kind, savedQueryId + parameters? \| question + connectionIds?, cron, timeZone?, enabled?}` | `201` with the routine and its next 3 runs |
+| `GET /schedule-preview?cron=&timeZone=` | The schedule in words and its next 3 runs, or `422` saying why not |
+| `GET /:id` | The routine, its next 3 runs, and (for its owner) its conversation |
+| `PATCH /:id` `{version, …}` | Owner, owners, admins; a new schedule moves the next run |
+| `POST /:id/pause`, `POST /:id/resume` | Owner, owners, admins |
+| `POST /:id/run` `{mutationId}` | `202` with the run (`200` when the id was sent before; `429` when this backend is full) |
+| `GET /:id/runs?limit=&offset=` | Runs newest first, with errors and links to the query run or conversation |
+| `DELETE /:id` | Deletes the routine and its runs; its conversation stays with its owner |
+
 ## Local demo (synthetic data)
 
 With `DATABASE_URL`, `CONNECTION_ENCRYPTION_KEY`, `ALLOW_DEV_LOGIN=true`, and the demo URLs set
@@ -397,6 +578,19 @@ in `backend/.env.local` (add `AGENT_PROVIDER=scripted` to ask questions without 
    are all there. Restart the backend while “Who are our top customers?” waits for your answer,
    then answer it: the question goes on. A question a restart stops while it works shows as
    interrupted with **Retry**.
+8. On an answer's evidence, choose **Save as query**, add a date and time parameter (for example
+   `ordered_at >= {{since}}` with the default “Start of this month”), save, run it with its default
+   and with another date, and download its CSV. Set the workspace time zone on **Settings**.
+9. On a saved query, choose **Add to dashboard**, name a new dashboard, and add it as a table or
+   a number (for example a revenue column as a currency). On the dashboard, add a Markdown note
+   and a line or bar chart, drag and resize the panels, change a chart's settings, and reload: the
+   layout, the settings, and the results are the same. **Refresh all** runs each saved query once,
+   and a panel whose refresh fails keeps its last result. Narrow the window to see the panels
+   stack in one column.
+10. On a saved query, choose **Create routine**, pick “Every few minutes” (set
+    `ROUTINE_MIN_INTERVAL_MINUTES=1` for a quicker demo), and watch its runs appear in the
+    history. Pause and resume it, choose **Run now**, and create a question routine for “What is
+    the refund rate?”: its answers appear in a “Routine:” conversation on **Ask**.
 
 ## Integration tests
 
