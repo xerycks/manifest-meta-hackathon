@@ -25,6 +25,9 @@ import { CredentialSealer } from "../connections/credentials.js"
 import { ConnectionsRepository } from "../connections/repository.js"
 import { connectionsRouter, type ConnectionsDeps } from "../connections/routes.js"
 import { ConnectionsService } from "../connections/service.js"
+import { DashboardsRepository } from "../dashboards/repository.js"
+import { dashboardsRouter, type DashboardsDeps } from "../dashboards/routes.js"
+import { DashboardsService } from "../dashboards/service.js"
 import { KnowledgeRepository } from "../knowledge/repository.js"
 import { knowledgeRouter, type KnowledgeDeps } from "../knowledge/routes.js"
 import { KnowledgeService } from "../knowledge/service.js"
@@ -89,6 +92,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let searchDeps: SearchDeps | null = null
   let queriesDeps: QueriesDeps | null = null
   let savedQueriesDeps: SavedQueriesDeps | null = null
+  let dashboardsDeps: DashboardsDeps | null = null
   let agentDeps: AgentDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
@@ -158,19 +162,31 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
     // Questions read metadata from storage; queries need the key, and tools say so without it.
     const provider = deps.modelProvider !== undefined ? deps.modelProvider : createModelProvider(env)
     const runs = new AgentRunsRepository(pool)
+    const savedQueriesRepository = new SavedQueriesRepository(pool)
     savedQueriesDeps = {
       workspaces,
       auth,
       sessionSecret,
       savedQueries: executor
         ? new SavedQueriesService({
-            savedQueries: new SavedQueriesRepository(pool),
+            savedQueries: savedQueriesRepository,
             executions,
             executor,
             settings,
             runs,
           })
         : null,
+    }
+    // Dashboards show stored results, so they work without the key; running a panel's query needs it.
+    dashboardsDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      dashboards: new DashboardsService({
+        dashboards: new DashboardsRepository(pool),
+        savedQueries: savedQueriesRepository,
+        executions,
+      }),
     }
     agentDeps = {
       workspaces,
@@ -234,6 +250,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", searchRouter(searchDeps))
   app.use("/api/v1", queriesRouter(queriesDeps))
   app.use("/api/v1", savedQueriesRouter(savedQueriesDeps))
+  app.use("/api/v1", dashboardsRouter(dashboardsDeps))
   app.use("/api/v1", agentRouter(agentDeps))
 
   app.use(notFoundHandler)

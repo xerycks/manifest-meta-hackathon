@@ -111,6 +111,32 @@ function firstRecord(rows: ExecutionRow[]): ExecutionRecord | null {
   return rows[0] ? toRecord(rows[0]) : null
 }
 
+/** A succeeded run's stored columns and leading rows, without its query (e.g. for dashboard panels). */
+export interface ExecutionPreview {
+  id: string
+  connectionId: string
+  parameters: Record<string, string | null> | null
+  createdAt: string
+  finishedAt: string | null
+  /** Its stored result, holding only the leading rows asked for. */
+  result: QueryResult
+}
+
+interface PreviewRow {
+  id: string
+  connection_id: string
+  parameters: Record<string, string | null> | null
+  row_count: number | null
+  truncated: boolean
+  truncated_by: TruncatedBy | null
+  duration_ms: number | null
+  created_at: Date
+  finished_at: Date | null
+  columns: ResultColumn[]
+  leading: Cell[][]
+  stored_rows: number
+}
+
 /** Execution records; every query is scoped by workspace_id. */
 export class QueryExecutionsRepository {
   constructor(private readonly pool: Pool) {}
@@ -210,6 +236,40 @@ export class QueryExecutionsRepository {
       [workspaceId, ids],
     )
     return rows.map(toRecord)
+  }
+
+  /**
+   * The succeeded executions among `ids` with their stored columns and at most
+   * `maxRows` leading rows, cut in the database so large snapshots stay there.
+   */
+  async previews(workspaceId: string, ids: string[], maxRows: number): Promise<ExecutionPreview[]> {
+    if (ids.length === 0) return []
+    const { rows } = await this.pool.query<PreviewRow>(
+      `SELECT id, connection_id, parameters, row_count, truncated, truncated_by, duration_ms, created_at,
+              finished_at, result -> 'columns' AS columns,
+              json_array_length(result -> 'rows') AS stored_rows,
+              (SELECT coalesce(json_agg(r.value ORDER BY r.n), '[]'::json)
+                 FROM json_array_elements(result -> 'rows') WITH ORDINALITY AS r (value, n)
+                WHERE r.n <= $3) AS leading
+         FROM query_executions
+        WHERE workspace_id = $1 AND id = ANY ($2::uuid[]) AND status = 'succeeded' AND result IS NOT NULL`,
+      [workspaceId, ids, maxRows],
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      connectionId: row.connection_id,
+      parameters: row.parameters,
+      createdAt: row.created_at.toISOString(),
+      finishedAt: row.finished_at?.toISOString() ?? null,
+      result: {
+        columns: row.columns,
+        rows: row.leading,
+        rowCount: row.row_count ?? row.stored_rows,
+        truncated: row.truncated,
+        truncatedBy: row.truncated_by,
+        durationMs: row.duration_ms ?? 0,
+      },
+    }))
   }
 
   /**
