@@ -1,4 +1,4 @@
-import { Pencil, RefreshCw, Trash2 } from "lucide-react"
+import { BookOpenText, Pencil, RefreshCw, Trash2 } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 
@@ -8,10 +8,10 @@ import { cn } from "@/shared/lib/cn.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
 import { Button, buttonVariants } from "@/shared/ui/button.tsx"
 import { Card } from "@/shared/ui/card.tsx"
+import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
 
 import { describeConnectionError, SSL_MODE_OPTIONS } from "./connection-form.ts"
 import { ConnectionStatusBadge } from "./ConnectionStatusBadge.tsx"
-import { FailureNotice } from "./FailureNotice.tsx"
 
 const ENGINE_LABELS: Record<Connection["engine"], string> = {
   postgres: "PostgreSQL",
@@ -96,27 +96,35 @@ export function ConnectionCard({
       )}
       {failure && <FailureNotice title={failure.title} message={failure.message} />}
 
-      {canManage && !confirming && (
+      {!confirming && (
         <div className="flex flex-wrap gap-2">
-          <Button
-            variant="secondary"
-            onClick={() => retest.mutate(connection.id)}
-            disabled={retest.isPending}
-          >
-            <RefreshCw
-              aria-hidden
-              className={cn("size-4", retest.isPending && "animate-spin motion-reduce:animate-none")}
-            />
-            {retest.isPending ? "Testing…" : "Retest"}
-          </Button>
-          <Link to={`/sources/${connection.id}`} className={buttonVariants({ variant: "secondary" })}>
-            <Pencil aria-hidden className="size-4" />
-            Edit
+          <Link to={`/manifests/${connection.id}`} className={buttonVariants({ variant: "secondary" })}>
+            <BookOpenText aria-hidden className="size-4" />
+            Browse metadata
           </Link>
-          <Button ref={removeTrigger} variant="ghost" onClick={() => setConfirming(true)}>
-            <Trash2 aria-hidden className="size-4" />
-            Remove
-          </Button>
+          {canManage && (
+            <>
+              <Button
+                variant="secondary"
+                onClick={() => retest.mutate(connection.id)}
+                disabled={retest.isPending}
+              >
+                <RefreshCw
+                  aria-hidden
+                  className={cn("size-4", retest.isPending && "animate-spin motion-reduce:animate-none")}
+                />
+                {retest.isPending ? "Testing…" : "Retest"}
+              </Button>
+              <Link to={`/sources/${connection.id}`} className={buttonVariants({ variant: "secondary" })}>
+                <Pencil aria-hidden className="size-4" />
+                Edit
+              </Link>
+              <Button ref={removeTrigger} variant="ghost" onClick={() => setConfirming(true)}>
+                <Trash2 aria-hidden className="size-4" />
+                Remove
+              </Button>
+            </>
+          )}
         </div>
       )}
 

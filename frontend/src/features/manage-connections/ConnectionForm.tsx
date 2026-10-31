@@ -12,6 +12,7 @@ import type { Connection, ConnectionTestResult, SslMode } from "@/entities/conne
 import { cn } from "@/shared/lib/cn.ts"
 import { Button, buttonVariants } from "@/shared/ui/button.tsx"
 import { Card, CardDescription, CardTitle } from "@/shared/ui/card.tsx"
+import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
 import { Checkbox, Input, Label, Select } from "@/shared/ui/fields.tsx"
 import { LoadingState } from "@/shared/ui/states.tsx"
 
@@ -30,7 +31,6 @@ import {
   toUpdateInput,
   type ConnectionDraft,
 } from "./connection-form.ts"
-import { FailureNotice } from "./FailureNotice.tsx"
 
 function Field({
   id,

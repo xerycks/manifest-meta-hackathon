@@ -2,6 +2,8 @@ import { Component, type ReactNode } from "react"
 import { Navigate, Outlet, createBrowserRouter } from "react-router-dom"
 
 import { HomePage } from "@/pages/home/HomePage.tsx"
+import { ManifestBrowserPage } from "@/pages/manifests/ManifestBrowserPage.tsx"
+import { ManifestsPage } from "@/pages/manifests/ManifestsPage.tsx"
 import { NotFoundPage } from "@/pages/not-found/NotFoundPage.tsx"
 import { PlaceholderPage } from "@/pages/placeholder/PlaceholderPage.tsx"
 import { SettingsPage } from "@/pages/settings/SettingsPage.tsx"
@@ -62,16 +64,9 @@ export const router = createBrowserRouter([
           { path: "sources", element: <SourcesPage /> },
           { path: "sources/new", element: <NewSourcePage /> },
           { path: "sources/:connectionId", element: <EditSourcePage /> },
-          {
-            path: "manifests",
-            element: (
-              <PlaceholderPage
-                title="Manifests"
-                emptyTitle="Nothing to document yet"
-                description="After connecting a source, its tables and columns appear here so you can describe what they mean in business terms."
-              />
-            ),
-          },
+          { path: "manifests", element: <ManifestsPage /> },
+          { path: "manifests/:connectionId", element: <ManifestBrowserPage /> },
+          { path: "manifests/:connectionId/objects/:objectId", element: <ManifestBrowserPage /> },
           {
             path: "saved",
             element: (

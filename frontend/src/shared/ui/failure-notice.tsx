@@ -1,5 +1,15 @@
-/** Compact inline error for connection problems; keeps the surrounding form usable. */
-export function FailureNotice({ title, message }: { title: string; message: string }) {
+import type { ReactNode } from "react"
+
+/** Compact inline error that keeps the surrounding form or content usable. */
+export function FailureNotice({
+  title,
+  message,
+  children,
+}: {
+  title: string
+  message: string
+  children?: ReactNode
+}) {
   return (
     <div
       role="alert"
@@ -7,6 +17,7 @@ export function FailureNotice({ title, message }: { title: string; message: stri
     >
       <p className="font-medium">{title}</p>
       <p className="mt-0.5 leading-6">{message}</p>
+      {children}
     </div>
   )
 }

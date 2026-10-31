@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
-import { ApiError, apiRequest } from "@/shared/api/client.ts"
+import { apiRequest } from "@/shared/api/client.ts"
+import { retryServerErrors } from "@/shared/api/retry.ts"
 import { workspacePath } from "@/shared/api/workspace-scope.ts"
 
 import type {
@@ -15,12 +16,6 @@ import type {
 const connectionsKey = (workspaceId: string | null) => ["connections", workspaceId] as const
 const connectionKey = (workspaceId: string | null, connectionId: string) =>
   [...connectionsKey(workspaceId), connectionId] as const
-
-/** Client errors (404, 422, 403) are answers, not glitches: never retry them. */
-function retryServerErrors(failureCount: number, error: Error): boolean {
-  if (error instanceof ApiError && error.status >= 400 && error.status < 500) return false
-  return failureCount < 1
-}
 
 function requireWorkspace(workspaceId: string | null): string {
   if (!workspaceId) throw new Error("Select a workspace first")

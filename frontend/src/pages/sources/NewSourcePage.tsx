@@ -38,7 +38,11 @@ export function NewSourcePage() {
           key={session.workspaceId}
           workspaceId={session.workspaceId}
           onSaved={(connection) =>
-            navigate("/sources", { state: { notice: `Saved “${connection.name}”.` } })
+            navigate("/sources", {
+              state: {
+                notice: `Saved “${connection.name}”. Manifest is discovering its tables and columns now.`,
+              },
+            })
           }
         />
       )}
