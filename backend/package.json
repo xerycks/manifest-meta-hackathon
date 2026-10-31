@@ -15,7 +15,8 @@
     "test": "node --import tsx --test tests/unit/*.test.ts",
     "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/*.test.ts",
     "db:migrate": "tsx --env-file-if-exists=.env.local src/storage/migrate.ts",
-    "db:seed": "tsx --env-file-if-exists=.env.local src/storage/seed.ts"
+    "db:seed": "tsx --env-file-if-exists=.env.local src/storage/seed.ts",
+    "db:demo-source": "tsx --env-file-if-exists=.env.local src/storage/demo-source.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

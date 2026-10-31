@@ -32,6 +32,15 @@ test("without DATABASE_URL, workspace endpoints return 503 STORAGE_NOT_CONFIGURE
   assert.equal(body.error.code, "STORAGE_NOT_CONFIGURED")
 })
 
+test("without DATABASE_URL, connection endpoints also return 503 STORAGE_NOT_CONFIGURED", async () => {
+  const response = await fetch(
+    `${baseUrl}/api/v1/workspaces/00000000-0000-0000-0000-000000000000/connections`,
+  )
+  assert.equal(response.status, 503)
+  const body = (await response.json()) as { error: { code: string } }
+  assert.equal(body.error.code, "STORAGE_NOT_CONFIGURED")
+})
+
 test("health still reports ok and names the missing storage", async () => {
   const response = await fetch(`${baseUrl}/health`)
   const body = (await response.json()) as { result: { status: string; storage: string } }

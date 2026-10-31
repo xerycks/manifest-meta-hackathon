@@ -19,10 +19,16 @@ const envSchema = z
           .filter(Boolean),
       ),
     DATABASE_URL: z.string().url().optional(),
+
+    // Seals saved source credentials (Cycle 05). Without it, connection
+    // endpoints answer 503; it is required in production when storage is on.
     CONNECTION_ENCRYPTION_KEY: z
       .string()
       .regex(/^[0-9a-fA-F]{64}$/, "must be 64 hex characters")
       .optional(),
+
+    // Synthetic demo source built by `npm run db:demo-source` (local only).
+    DEMO_SOURCE_DATABASE_URL: z.string().url().optional(),
 
     // Browser sessions (Cycle 04). Required in production when storage is on;
     // locally an ephemeral secret is generated and sessions reset on restart.
@@ -51,6 +57,13 @@ const envSchema = z
         code: "custom",
         path: ["SESSION_SECRET"],
         message: "SESSION_SECRET is required in production when storage is configured",
+      })
+    }
+    if (env.NODE_ENV === "production" && env.DATABASE_URL && !env.CONNECTION_ENCRYPTION_KEY) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["CONNECTION_ENCRYPTION_KEY"],
+        message: "CONNECTION_ENCRYPTION_KEY is required in production when storage is configured",
       })
     }
   })

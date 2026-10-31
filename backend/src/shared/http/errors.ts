@@ -7,6 +7,8 @@ export type ErrorCode =
   | "NOT_FOUND"
   | "CONFLICT"
   | "STORAGE_NOT_CONFIGURED"
+  | "CONNECTIONS_NOT_CONFIGURED"
+  | "SOURCE_CONNECTION_FAILED"
   | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
 
@@ -61,5 +63,18 @@ export class AppError extends Error {
       "STORAGE_NOT_CONFIGURED",
       "Application storage is not configured. Set DATABASE_URL and restart the backend.",
     )
+  }
+
+  static connectionsNotConfigured(): AppError {
+    return new AppError(
+      503,
+      "CONNECTIONS_NOT_CONFIGURED",
+      "Source connections are not configured. Set CONNECTION_ENCRYPTION_KEY (openssl rand -hex 32) and restart the backend.",
+    )
+  }
+
+  /** A source database could not be reached or used; `reason` is a stable machine code. */
+  static sourceConnectionFailed(reason: string, message: string): AppError {
+    return new AppError(422, "SOURCE_CONNECTION_FAILED", message, { reason })
   }
 }

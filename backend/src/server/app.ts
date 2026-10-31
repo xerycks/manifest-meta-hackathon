@@ -12,6 +12,12 @@ import {
 import { authRouter, type AuthDeps } from "../auth/routes.js"
 import { AuthService } from "../auth/service.js"
 import type { Env } from "../config/env.js"
+import { createSourceAdapters } from "../connections/adapters/index.js"
+import type { SourceAdapters } from "../connections/adapters/types.js"
+import { CredentialSealer } from "../connections/credentials.js"
+import { ConnectionsRepository } from "../connections/repository.js"
+import { connectionsRouter, type ConnectionsDeps } from "../connections/routes.js"
+import { ConnectionsService } from "../connections/service.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
 import { ok } from "../shared/http/respond.js"
 import { WorkspacesRepository, WorkspaceSettingsRepository } from "../workspaces/repository.js"
@@ -28,6 +34,8 @@ export interface AppDeps {
   pool?: Pool | null
   sessionSecret?: string
   googleProvider?: GoogleProvider | null
+  /** Source adapters (and their pools); pass them in to close them on shutdown. */
+  sources?: SourceAdapters
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
@@ -40,6 +48,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
 
   let workspaceDeps: WorkspaceDeps | null = null
   let authDeps: AuthDeps | null = null
+  let connectionsDeps: ConnectionsDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
     const workspaces = new WorkspacesRepository(pool)
@@ -67,6 +76,18 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       sessionSecret,
       google,
     }
+    connectionsDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      connections: env.CONNECTION_ENCRYPTION_KEY
+        ? new ConnectionsService(
+            new ConnectionsRepository(pool),
+            new CredentialSealer(env.CONNECTION_ENCRYPTION_KEY),
+            deps.sources ?? createSourceAdapters(),
+          )
+        : null,
+    }
   }
 
   app.disable("x-powered-by")
@@ -89,6 +110,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.get("/api/v1/ping", (_req: Request, res: Response) => ok(res, { pong: true }))
   app.use("/api/v1", authRouter(env, authDeps))
   app.use("/api/v1", workspacesRouter(workspaceDeps))
+  app.use("/api/v1", connectionsRouter(connectionsDeps))
 
   app.use(notFoundHandler)
   app.use(errorHandler)
