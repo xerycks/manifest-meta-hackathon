@@ -15,6 +15,7 @@ import {
   movedIds,
   numberCells,
   panelTitle,
+  runValues,
   shownResult,
 } from "../src/entities/dashboards/panel-config.ts"
 import type { DashboardPanel, NumberConfig } from "../src/entities/dashboards/types.ts"
@@ -203,6 +204,16 @@ test("panel configs are checked against a result's columns, and panels show only
   assert.equal(panelTitle("  ", "Order totals"), "Order totals")
   assert.equal(panelTitle("Revenue", "Order totals"), "Revenue")
   assert.equal(panelTitle("", null), "")
+})
+
+test("a panel says which parameter values its result ran with", () => {
+  assert.equal(runValues(null), null)
+  assert.equal(runValues({}), null)
+  assert.equal(
+    runValues({ since: "2026-07-31T00:00:00+05:30", until: null }),
+    "since: 2026-07-31 00:00:00+05:30 · until: none",
+  )
+  assert.equal(runValues({ day: "2026-10-01" }), "day: 2026-10-01")
 })
 
 test("panels move one place at a time, and only editors may move them", () => {

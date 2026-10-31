@@ -1,5 +1,6 @@
 import type { WorkspaceRole } from "../../app/organization-role.ts"
 import type { Cell, ColumnKind, QueryResult, ResultColumn } from "../queries/types.ts"
+import { formatParameterValue } from "../saved-queries/parameters.ts"
 import {
   DASHBOARD_LIMITS,
   type Dashboard,
@@ -171,6 +172,18 @@ export function numberCells(
 /** The panel's own title, else its saved query's name. */
 export function panelTitle(title: string, savedQueryName: string | null): string {
   return title.trim() || savedQueryName || ""
+}
+
+/**
+ * The parameter values a panel's result ran with ("since: 2026-07-31 00:00:00+05:30"), or null
+ * without any. A panel shows its saved query's latest run, which a routine or a rerun with other
+ * values may have made, so the values say what the result covers.
+ */
+export function runValues(parameters: Record<string, string | null> | null): string | null {
+  const values = Object.entries(parameters ?? {}).map(
+    ([name, value]) => `${name}: ${value === null ? "none" : formatParameterValue(value)}`,
+  )
+  return values.length > 0 ? values.join(" · ") : null
 }
 
 /** Mirrors the server: the creator or an owner or admin changes a dashboard and its panels. */

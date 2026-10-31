@@ -4,7 +4,7 @@ import { Link } from "react-router-dom"
 
 import { useAddPanel, useDeletePanel } from "@/entities/dashboards/api.ts"
 import { PanelBody } from "@/entities/dashboards/PanelBody.tsx"
-import { PANEL_KIND_LABELS, panelTitle } from "@/entities/dashboards/panel-config.ts"
+import { PANEL_KIND_LABELS, panelTitle, runValues } from "@/entities/dashboards/panel-config.ts"
 import type { DashboardPanel, PanelStatus } from "@/entities/dashboards/types.ts"
 import { apiErrorMessage } from "@/shared/lib/draft.ts"
 import { cn } from "@/shared/lib/cn.ts"
@@ -146,6 +146,7 @@ export function DashboardPanelCard({
   const data = panel.data
   const savedQuery = data?.state === "available" ? data.savedQuery : null
   const latestRun = data?.state === "available" ? data.latestRun : null
+  const values = runValues(latestRun?.parameters ?? null)
   const title = panelTitle(panel.title, savedQuery?.name ?? null)
   const label = title || `${PANEL_KIND_LABELS[panel.kind]} panel`
   const refreshing = status?.state === "refreshing"
@@ -169,6 +170,11 @@ export function DashboardPanelCard({
                 {savedQuery.name}
               </Link>
               {status && <StatusText status={status} />}
+            </p>
+          )}
+          {values && (
+            <p className="mt-0.5 truncate text-xs text-(--muted)" title={`Ran with ${values}`}>
+              Ran with {values}
             </p>
           )}
         </div>
