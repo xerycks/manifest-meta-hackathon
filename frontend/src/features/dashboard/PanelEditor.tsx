@@ -1,10 +1,17 @@
-import { ArrowDown, ArrowUp, Lock, Play, Plus, X } from "lucide-react"
+import { ArrowDown, ArrowUp, Lock, Play, Plus, Trash2, X } from "lucide-react"
 import { useEffect, useId, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 
 import { PanelBody } from "@/entities/dashboards/PanelBody.tsx"
 import { holdsNumbers, movedIds, PANEL_KIND_LABELS } from "@/entities/dashboards/panel-config.ts"
-import { DASHBOARD_LIMITS, type NumberFormat, type PanelKind } from "@/entities/dashboards/types.ts"
+import {
+  DASHBOARD_LIMITS,
+  type NumberFormat,
+  type PanelKind,
+  type SeriesSort,
+  type ThresholdStatus,
+  type XFormat,
+} from "@/entities/dashboards/types.ts"
 import { describeRunError } from "@/entities/queries/run-outcome.ts"
 import type { ResultColumn } from "@/entities/queries/types.ts"
 import { useRunSavedQuery, useSavedQueries, useSavedQuery } from "@/entities/saved-queries/api.ts"
@@ -14,25 +21,48 @@ import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
 import { useDebouncedValue } from "@/shared/lib/use-debounced-value.ts"
 import { Button } from "@/shared/ui/button.tsx"
 import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
-import { Input, Select } from "@/shared/ui/fields.tsx"
+import { Checkbox, Input, Select } from "@/shared/ui/fields.tsx"
 import { Choice, described, Field } from "@/shared/ui/form-field.tsx"
 import { MarkdownEditor } from "@/shared/ui/markdown-editor.tsx"
 import { LoadingState } from "@/shared/ui/states.tsx"
 
-import { draftDefinition, firstNumberColumn, type PanelDraft, type PanelErrors } from "./panel-form.ts"
+import {
+  DECIMAL_CHOICES,
+  draftDefinition,
+  settingsErrors,
+  suggestedColumns,
+  type PanelDraft,
+  type PanelErrors,
+} from "./panel-form.ts"
 
-const KIND_OPTIONS: { value: PanelKind; label: string }[] = [
-  { value: "table", label: PANEL_KIND_LABELS.table },
-  { value: "number", label: PANEL_KIND_LABELS.number },
-  { value: "markdown", label: PANEL_KIND_LABELS.markdown },
-]
+const KIND_ORDER: PanelKind[] = ["table", "number", "bar", "line", "gauge", "ticker", "sankey", "markdown"]
+const KIND_OPTIONS = KIND_ORDER.map((value) => ({ value, label: PANEL_KIND_LABELS[value] }))
 const FORMAT_OPTIONS: { value: NumberFormat; label: string }[] = [
   { value: "number", label: "Number" },
   { value: "currency", label: "Currency" },
   { value: "percent", label: "Percent" },
 ]
-const DECIMAL_CHOICES = ["0", "1", "2", "3", "4", "5", "6"]
+const SORT_OPTIONS: { value: SeriesSort; label: string; bars?: true }[] = [
+  { value: "none", label: "Result order" },
+  { value: "x", label: "By the x column" },
+  { value: "value_desc", label: "Largest first", bars: true },
+  { value: "value_asc", label: "Smallest first", bars: true },
+]
+const X_FORMAT_OPTIONS: { value: XFormat; label: string }[] = [
+  { value: "auto", label: "From the column's type" },
+  { value: "text", label: "As stored" },
+  { value: "date", label: "Date (Oct 31, 2026)" },
+  { value: "month", label: "Month (Oct 2026)" },
+  { value: "datetime", label: "Date and time" },
+]
+const STATUS_OPTIONS: { value: ThresholdStatus; label: string }[] = [
+  { value: "good", label: "Good" },
+  { value: "warning", label: "Warning" },
+  { value: "critical", label: "Critical" },
+]
 const CURRENCY_HINT = "ISO 4217 code, e.g. USD, EUR, INR."
+/** Kinds whose preview fills a fixed height, like the panel they become. */
+const SIZED_PREVIEWS = new Set<PanelKind>(["bar", "line", "gauge", "ticker", "sankey"])
 
 type SavedQueryState = ReturnType<typeof useSavedQuery>
 
@@ -155,7 +185,7 @@ function ColumnSelect({
   id: string
   label: string
   value: string
-  /** The latest result's columns of numbers; null types the name instead. */
+  /** The latest result's columns to choose from; null types the name instead. */
   columns: ResultColumn[] | null
   error: string | undefined
   hint?: string
@@ -172,7 +202,7 @@ function ColumnSelect({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         >
-          <option value="">{optional ? "No comparison" : "Choose a column"}</option>
+          <option value="">{optional ? "None" : "Choose a column"}</option>
           {value && !columns.some((column) => column.name === value) && (
             <option value={value}>{value}</option>
           )}
@@ -313,6 +343,262 @@ function TableColumns({
   )
 }
 
+/** How values are written: number, currency, or percent, with decimal places. */
+function FormatFields({
+  draft,
+  errors,
+  disabled,
+  set,
+}: {
+  draft: PanelDraft
+  errors: PanelErrors
+  disabled: boolean
+  set: (changes: Partial<PanelDraft>) => void
+}) {
+  const id = useId()
+  const decimalsHint =
+    draft.format === "percent" ? "Percent values are ratios: 0.25 shows as 25%." : undefined
+  return (
+    <>
+      <Choice
+        label="Format"
+        value={draft.format}
+        options={FORMAT_OPTIONS}
+        onChange={(format) => set({ format })}
+      />
+      <Field id={`${id}-decimals`} label="Decimal places" hint={decimalsHint}>
+        <Select
+          {...described(`${id}-decimals`, undefined, decimalsHint)}
+          value={draft.decimals}
+          disabled={disabled}
+          onChange={(event) => set({ decimals: event.target.value })}
+        >
+          <option value="">As stored (every digit)</option>
+          {DECIMAL_CHOICES.map((places) => (
+            <option key={places} value={places}>
+              {places}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      {draft.format === "currency" && (
+        <Field id={`${id}-currency`} label="Currency" error={errors.currency} hint={CURRENCY_HINT}>
+          <Input
+            {...described(`${id}-currency`, errors.currency, CURRENCY_HINT)}
+            value={draft.currency}
+            maxLength={3}
+            autoCapitalize="characters"
+            className="w-28 uppercase"
+            disabled={disabled}
+            onChange={(event) => set({ currency: event.target.value.toUpperCase() })}
+          />
+        </Field>
+      )}
+    </>
+  )
+}
+
+/** The columns a bar or line chart plots: up to five columns of numbers. */
+function ValueColumns({
+  draft,
+  columns,
+  error,
+  disabled,
+  onChange,
+}: {
+  draft: PanelDraft
+  /** The latest result's columns of numbers; null types the names instead. */
+  columns: ResultColumn[] | null
+  error: string | undefined
+  disabled: boolean
+  onChange: (yColumns: string[]) => void
+}) {
+  const id = useId()
+  const full = draft.yColumns.length >= DASHBOARD_LIMITS.seriesColumns
+  if (!columns) {
+    const hint = "Column names, separated by commas."
+    return (
+      <Field id={id} label="Values" error={error} hint={hint}>
+        <Input
+          {...described(id, error, hint)}
+          value={draft.yColumns.join(", ")}
+          disabled={disabled}
+          placeholder="revenue, orders"
+          onChange={(event) =>
+            onChange(
+              event.target.value
+                .split(",")
+                .map((name) => name.trim())
+                .filter(Boolean),
+            )
+          }
+        />
+      </Field>
+    )
+  }
+  return (
+    <fieldset aria-describedby={error ? `${id}-message` : undefined}>
+      <legend className="text-sm font-medium">Values</legend>
+      <p className="text-xs leading-5 text-(--muted)">
+        Up to {DASHBOARD_LIMITS.seriesColumns} columns of numbers, one series each, on one axis.
+      </p>
+      {columns.length === 0 ? (
+        <p className="mt-1 text-sm text-(--muted)">The latest result has no columns of numbers.</p>
+      ) : (
+        <ul className="mt-1.5 space-y-1">
+          {columns.map((column) => {
+            const checked = draft.yColumns.includes(column.name)
+            return (
+              <li key={column.name}>
+                <label className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={checked}
+                    disabled={disabled || (!checked && full) || column.name === draft.xColumn}
+                    onChange={() =>
+                      onChange(
+                        checked
+                          ? draft.yColumns.filter((name) => name !== column.name)
+                          : [...draft.yColumns, column.name],
+                      )
+                    }
+                  />
+                  <span className="min-w-0 break-words">
+                    {column.name} <span className="text-(--muted)">({column.type})</span>
+                  </span>
+                </label>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {error && (
+        <p id={`${id}-message`} className="mt-1 text-xs font-medium text-(--danger)">
+          {error}
+        </p>
+      )}
+    </fieldset>
+  )
+}
+
+/** A gauge's thresholds: where each status starts, lowest first. */
+function Thresholds({
+  draft,
+  error,
+  disabled,
+  onChange,
+}: {
+  draft: PanelDraft
+  error: string | undefined
+  disabled: boolean
+  onChange: (thresholds: PanelDraft["thresholds"]) => void
+}) {
+  const id = useId()
+  const update = (index: number, changes: Partial<PanelDraft["thresholds"][number]>) =>
+    onChange(
+      draft.thresholds.map((threshold, at) => (at === index ? { ...threshold, ...changes } : threshold)),
+    )
+  return (
+    <fieldset className="space-y-2 sm:col-span-2" aria-describedby={error ? `${id}-message` : undefined}>
+      <legend className="text-sm font-medium">Thresholds (optional)</legend>
+      <p className="text-xs leading-5 text-(--muted)">
+        From each value up, the gauge shows its status. List them from the lowest to the highest.
+      </p>
+      {draft.thresholds.map((threshold, index) => (
+        <div key={index} className="flex flex-wrap items-end gap-2">
+          <div className="w-32">
+            <label htmlFor={`${id}-value-${index}`} className="text-xs font-medium">
+              From
+            </label>
+            <Input
+              id={`${id}-value-${index}`}
+              inputMode="decimal"
+              className="mt-1"
+              value={threshold.value}
+              disabled={disabled}
+              onChange={(event) => update(index, { value: event.target.value })}
+            />
+          </div>
+          <div className="w-36">
+            <label htmlFor={`${id}-status-${index}`} className="text-xs font-medium">
+              Status
+            </label>
+            <Select
+              id={`${id}-status-${index}`}
+              className="mt-1"
+              value={threshold.status}
+              disabled={disabled}
+              onChange={(event) => update(index, { status: event.target.value as ThresholdStatus })}
+            >
+              {STATUS_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <Button
+            variant="ghost"
+            className="p-2"
+            aria-label={`Remove the threshold from ${threshold.value || "an empty value"}`}
+            disabled={disabled}
+            onClick={() => onChange(draft.thresholds.filter((_threshold, at) => at !== index))}
+          >
+            <Trash2 aria-hidden className="size-4" />
+          </Button>
+        </div>
+      ))}
+      {draft.thresholds.length < DASHBOARD_LIMITS.gaugeThresholds && (
+        <Button
+          variant="secondary"
+          disabled={disabled}
+          onClick={() =>
+            onChange([
+              ...draft.thresholds,
+              { value: draft.thresholds.at(-1)?.value ?? draft.max, status: "warning" },
+            ])
+          }
+        >
+          <Plus aria-hidden className="size-4" />
+          Add a threshold
+        </Button>
+      )}
+      {error && (
+        <p id={`${id}-message`} className="text-xs font-medium text-(--danger)">
+          {error}
+        </p>
+      )}
+    </fieldset>
+  )
+}
+
+/** A bound of a gauge's scale, typed as a number. */
+function BoundField({
+  label,
+  value,
+  error,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: string
+  error: string | undefined
+  disabled: boolean
+  onChange: (value: string) => void
+}) {
+  const id = useId()
+  return (
+    <Field id={id} label={label} error={error}>
+      <Input
+        {...described(id, error)}
+        inputMode="decimal"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </Field>
+  )
+}
+
 /**
  * A panel's settings: its kind, its saved query, the kind's config, and a
  * title, with a live preview built from the saved query's latest stored
@@ -340,31 +626,49 @@ export function PanelEditor({
   const set = (changes: Partial<PanelDraft>) => onChange({ ...draft, ...changes })
   const savedQuery = draft.savedQueryId ? selected.data : undefined
   const latest = savedQuery?.latestRun?.result ?? null
-  const columns = latest?.columns ?? null
   // A panel names columns by their first occurrence, so repeated names are offered once.
-  const numberColumns =
-    columns?.filter(
-      (column, index) =>
-        holdsNumbers(column) && columns.findIndex((other) => other.name === column.name) === index,
-    ) ?? null
+  const columns = latest?.columns.filter(
+    (column, index) => latest.columns.findIndex((other) => other.name === column.name) === index,
+  )
+  const known = columns ?? null
+  const numberColumns = columns?.filter(holdsNumbers) ?? null
   const definition = draftDefinition(draft)
   const query = draft.kind !== "markdown"
   const previewable =
     draft.kind === "markdown"
       ? draft.body.trim() !== ""
-      : latest !== null && (draft.kind === "table" || draft.valueColumn !== "")
-
-  const decimalsHint =
-    draft.format === "percent" ? "Percent values are ratios: 0.25 shows as 25%." : undefined
+      : latest !== null && Object.keys(settingsErrors(draft)).length === 0
   const titleHint = query ? "Leave empty to use the saved query's name." : undefined
 
   function chooseKind(kind: PanelKind) {
-    set(
-      kind === "number" && !draft.valueColumn && columns
-        ? { kind, valueColumn: firstNumberColumn(columns) }
-        : { kind },
-    )
+    set({ kind, ...(columns ? suggestedColumns(kind, draft, columns) : {}) })
   }
+
+  const column = (
+    field:
+      | "valueColumn"
+      | "comparisonColumn"
+      | "xColumn"
+      | "labelColumn"
+      | "deltaColumn"
+      | "sourceColumn"
+      | "targetColumn",
+    label: string,
+    options: { numbers?: boolean; hint?: string; optional?: boolean } = {},
+  ) => (
+    <ColumnSelect
+      id={`${id}-${field}`}
+      label={label}
+      value={draft[field]}
+      columns={options.numbers ? numberColumns : known}
+      error={errors[field]}
+      hint={options.hint}
+      optional={options.optional}
+      disabled={disabled}
+      onChange={(value) => set({ [field]: value })}
+    />
+  )
+  const format = <FormatFields draft={draft} errors={errors} disabled={disabled} set={set} />
 
   return (
     <div className="space-y-5">
@@ -419,67 +723,129 @@ export function PanelEditor({
 
       {draft.kind === "number" && (
         <div className="grid gap-4 sm:grid-cols-2">
-          <ColumnSelect
-            id={`${id}-value`}
-            label="Value column"
-            value={draft.valueColumn}
-            columns={numberColumns}
-            error={errors.valueColumn}
-            hint="The panel shows this column of the first row."
-            disabled={disabled}
-            onChange={(valueColumn) => set({ valueColumn })}
-          />
-          <ColumnSelect
-            id={`${id}-comparison`}
-            label="Compare with (optional)"
-            value={draft.comparisonColumn}
-            columns={numberColumns?.filter((column) => column.name !== draft.valueColumn) ?? null}
-            error={errors.comparisonColumn}
-            hint="Shows the difference, e.g. against last month."
-            optional
-            disabled={disabled}
-            onChange={(comparisonColumn) => set({ comparisonColumn })}
-          />
-          <Choice
-            label="Format"
-            value={draft.format}
-            options={FORMAT_OPTIONS}
-            onChange={(format) => set({ format })}
-          />
-          <Field id={`${id}-decimals`} label="Decimal places" hint={decimalsHint}>
+          {column("valueColumn", "Value column", {
+            numbers: true,
+            hint: "The panel shows this column of the first row.",
+          })}
+          {column("comparisonColumn", "Compare with (optional)", {
+            numbers: true,
+            optional: true,
+            hint: "Shows the difference, e.g. against last month.",
+          })}
+          {format}
+        </div>
+      )}
+      {(draft.kind === "bar" || draft.kind === "line") && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {column("xColumn", draft.kind === "bar" ? "Categories (x axis)" : "Along (x axis)", {
+            hint: draft.kind === "bar" ? "One bar per value; rows with the same value add up." : undefined,
+          })}
+          <Field id={`${id}-x-format`} label="Write x values">
             <Select
-              {...described(`${id}-decimals`, undefined, decimalsHint)}
-              value={draft.decimals}
+              id={`${id}-x-format`}
+              value={draft.xFormat}
               disabled={disabled}
-              onChange={(event) => set({ decimals: event.target.value })}
+              onChange={(event) => set({ xFormat: event.target.value as XFormat })}
             >
-              <option value="">As stored (every digit)</option>
-              {DECIMAL_CHOICES.map((places) => (
-                <option key={places} value={places}>
-                  {places}
+              {X_FORMAT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
                 </option>
               ))}
             </Select>
           </Field>
-          {draft.format === "currency" && (
-            <Field id={`${id}-currency`} label="Currency" error={errors.currency} hint={CURRENCY_HINT}>
-              <Input
-                {...described(`${id}-currency`, errors.currency, CURRENCY_HINT)}
-                value={draft.currency}
-                maxLength={3}
-                autoCapitalize="characters"
-                className="w-28 uppercase"
-                disabled={disabled}
-                onChange={(event) => set({ currency: event.target.value.toUpperCase() })}
-              />
-            </Field>
-          )}
+          <div className="sm:col-span-2">
+            <ValueColumns
+              draft={draft}
+              columns={numberColumns}
+              error={errors.yColumns}
+              disabled={disabled}
+              onChange={(yColumns) => set({ yColumns })}
+            />
+          </div>
+          <Field id={`${id}-sort`} label="Order" error={errors.sort}>
+            <Select
+              {...described(`${id}-sort`, errors.sort)}
+              value={draft.kind === "line" && draft.sort !== "x" ? "none" : draft.sort}
+              disabled={disabled}
+              onChange={(event) => set({ sort: event.target.value as SeriesSort })}
+            >
+              {SORT_OPTIONS.filter((option) => draft.kind === "bar" || !option.bars).map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <label className="flex items-center gap-2 self-end pb-2 text-sm">
+            <Checkbox
+              checked={draft.stacked}
+              disabled={disabled || draft.yColumns.length < 2}
+              onChange={(event) => set({ stacked: event.target.checked })}
+            />
+            {draft.kind === "bar" ? "Stack the bars" : "Stack as areas (running totals)"}
+          </label>
+          {format}
+        </div>
+      )}
+      {draft.kind === "gauge" && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {column("valueColumn", "Value column", {
+            numbers: true,
+            hint: "The gauge shows this column of the first row.",
+          })}
+          <div className="grid grid-cols-2 gap-3">
+            <BoundField
+              label="Minimum"
+              value={draft.min}
+              error={errors.min}
+              disabled={disabled}
+              onChange={(min) => set({ min })}
+            />
+            <BoundField
+              label="Maximum"
+              value={draft.max}
+              error={errors.max}
+              disabled={disabled}
+              onChange={(max) => set({ max })}
+            />
+          </div>
+          <Thresholds
+            draft={draft}
+            error={errors.thresholds}
+            disabled={disabled}
+            onChange={(thresholds) => set({ thresholds })}
+          />
+          {format}
+        </div>
+      )}
+      {draft.kind === "ticker" && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {column("labelColumn", "Labels")}
+          {column("valueColumn", "Values", { numbers: true })}
+          {column("deltaColumn", "Change (optional)", {
+            numbers: true,
+            optional: true,
+            hint: "Shown signed beside each value, e.g. since yesterday.",
+          })}
+          <div className="hidden sm:block" />
+          {format}
+        </div>
+      )}
+      {draft.kind === "sankey" && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          {column("sourceColumn", "From (source)")}
+          {column("targetColumn", "To (target)")}
+          {column("valueColumn", "Flow value", {
+            numbers: true,
+            hint: "Rows with the same source and target add up.",
+          })}
         </div>
       )}
       {draft.kind === "table" && (
         <TableColumns
           draft={draft}
-          columns={columns}
+          columns={known}
           error={errors.columns}
           disabled={disabled}
           onChange={(chosen) => set({ columns: chosen })}
@@ -525,7 +891,13 @@ export function PanelEditor({
       >
         <h3 className="text-xs font-medium tracking-wide text-(--muted) uppercase">Preview</h3>
         {previewable ? (
-          <PanelBody panel={definition} result={latest} label="Panel preview" />
+          <div
+            className={
+              SIZED_PREVIEWS.has(draft.kind) ? (draft.kind === "ticker" ? "h-24" : "h-72") : undefined
+            }
+          >
+            <PanelBody panel={definition} result={latest} label="Panel preview" />
+          </div>
         ) : (
           <p className="text-sm text-(--muted)">
             {draft.kind === "markdown"
@@ -534,7 +906,7 @@ export function PanelEditor({
                 ? "Choose a saved query to preview its latest result."
                 : !latest
                   ? "The preview appears once the saved query has a result."
-                  : "Choose the value column to preview the number."}
+                  : "Finish the settings above to preview the panel."}
           </p>
         )}
       </section>

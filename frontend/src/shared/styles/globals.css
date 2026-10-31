@@ -19,6 +19,23 @@
   --warning: #7a4b00;
   --warning-surface: #fff8e6;
   --warning-border: #f1d9a0;
+  /*
+   * Charts. Series take these hues in this order, never cycled; the order
+   * keeps neighbours apart for colour-vision deficiencies on this surface.
+   * Three sit below 3:1 against white, so every chart also has a table view.
+   */
+  --chart-1: #2a78d6;
+  --chart-2: #eb6834;
+  --chart-3: #1baf7a;
+  --chart-4: #eda100;
+  --chart-5: #e87ba4;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --chart-track: #ebe9e4;
+  /* Statuses are reserved for meaning (a gauge's thresholds) and always come with an icon and a label. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
 }
 
 body {
@@ -119,4 +136,33 @@ body {
 }
 .markdown hr {
   border-color: var(--border);
+}
+
+/* A ticker that does not fit scrolls sideways, paused on hover or focus, and still for reduced motion. */
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+.ticker-track[data-moving="true"] {
+  animation: ticker-scroll var(--ticker-duration, 30s) linear infinite;
+}
+.ticker:hover .ticker-track,
+.ticker:focus-within .ticker-track {
+  animation-play-state: paused;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track[data-moving="true"] {
+    animation: none;
+  }
+}
+
+/* Charts take keyboard focus (arrow keys move their tooltip); show where it is. */
+.recharts-surface:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }

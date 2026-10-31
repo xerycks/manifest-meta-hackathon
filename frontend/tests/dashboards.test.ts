@@ -22,11 +22,11 @@ import type { QueryResult, ResultColumn } from "../src/entities/queries/types.ts
 import { dashboardPatch, nameProblem } from "../src/features/dashboard/dashboard-form.ts"
 import {
   draftFromPanel,
-  firstNumberColumn,
   newPanelDraft,
   panelInput,
   panelPatch,
   privateQueryProblem,
+  suggestedColumns,
   type PanelDraft,
 } from "../src/features/dashboard/panel-form.ts"
 import { startDraft } from "../src/shared/lib/draft.ts"
@@ -167,6 +167,7 @@ test("panel configs are checked against a result's columns, and panels show only
   assert.deepEqual(
     columnProblem({ kind: "number", config: { ...numberConfig, comparisonColumn: "gone" } }, columns),
     {
+      field: "comparisonColumn",
       column: "gone",
       message: "The result has no column “gone”.",
     },
@@ -285,11 +286,12 @@ test("the panel form mirrors the server's checks and round-trips saved panels", 
     title: "Revenue",
     savedQueryId: SAVED_QUERY,
     config: numberConfig,
-    position: 0,
+    layout: { x: 0, y: 0, w: 3, h: 2 },
     version: 3,
     createdAt: "2026-10-31T10:00:00.000Z",
     updatedAt: "2026-10-31T10:00:00.000Z",
     data: null,
+    status: null,
   }
   const reopened = panelInput(draftFromPanel(saved), columns)
   assert.ok("input" in reopened)
@@ -302,8 +304,10 @@ test("the panel form mirrors the server's checks and round-trips saved panels", 
   assert.deepEqual(panelPatch(saved, reopened.input), { version: 3, ...reopened.input })
   const tablePanel: DashboardPanel = { ...saved, kind: "table", title: "", config: { columns: ["status"] } }
   assert.deepEqual(draftFromPanel(tablePanel).columns, ["status"])
-  assert.equal(firstNumberColumn(columns), "revenue")
-  assert.equal(firstNumberColumn([column("status", "text")]), "")
+  assert.deepEqual(suggestedColumns("number", newPanelDraft(), columns), { valueColumn: "revenue" })
+  assert.deepEqual(suggestedColumns("number", newPanelDraft(), [column("status", "text")]), {
+    valueColumn: "",
+  })
 })
 
 test("private saved queries only go on private dashboards; dashboard edits send what changed", () => {

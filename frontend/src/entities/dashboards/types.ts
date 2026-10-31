@@ -15,24 +15,59 @@ export const DASHBOARD_LIMITS = {
   tableColumns: 50,
   maxDecimals: 10,
   tableRows: 100,
+  seriesColumns: 5,
+  chartRows: 1_000,
+  tickerRows: 50,
+  gaugeThresholds: 4,
+  gaugeBound: 1e15,
 } as const
 
-export type PanelKind = "number" | "table" | "markdown"
+export type PanelKind = "number" | "table" | "markdown" | "bar" | "line" | "gauge" | "ticker" | "sankey"
 export type NumberFormat = "number" | "currency" | "percent"
 export type Visibility = "workspace" | "private"
+
+/** The dashboard grid: 12 columns, panels at most 12 rows tall, starting no lower than row 500. */
+export const GRID = { columns: 12, maxHeight: 12, maxRow: 500 } as const
+
+/** Each kind's smallest box, and the box a new panel gets. */
+export const PANEL_SIZES: Record<
+  PanelKind,
+  { min: { w: number; h: number }; default: { w: number; h: number } }
+> = {
+  number: { min: { w: 2, h: 2 }, default: { w: 3, h: 2 } },
+  table: { min: { w: 4, h: 3 }, default: { w: 12, h: 4 } },
+  markdown: { min: { w: 2, h: 1 }, default: { w: 4, h: 2 } },
+  bar: { min: { w: 3, h: 3 }, default: { w: 6, h: 4 } },
+  line: { min: { w: 3, h: 3 }, default: { w: 6, h: 4 } },
+  gauge: { min: { w: 2, h: 2 }, default: { w: 3, h: 3 } },
+  ticker: { min: { w: 3, h: 2 }, default: { w: 12, h: 2 } },
+  sankey: { min: { w: 4, h: 3 }, default: { w: 6, h: 5 } },
+}
+
+/** A panel's box on the grid: column, row, width in columns, height in rows. */
+export interface PanelBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** How values are written; decimals null keeps every stored digit. */
+export interface ValueFormat {
+  format: NumberFormat
+  decimals: number | null
+  /** ISO 4217, for currency values only. */
+  currency: string | null
+}
 
 /**
  * One value from the first row; a percent value is a ratio (0.25 shows as
  * 25%), and decimals null shows the value exactly as stored.
  */
-export interface NumberConfig {
+export interface NumberConfig extends ValueFormat {
   valueColumn: string
   /** Its difference from the value is shown next to it. */
   comparisonColumn: string | null
-  format: NumberFormat
-  decimals: number | null
-  /** ISO 4217, for currency values only. */
-  currency: string | null
 }
 
 export interface TableConfig {
@@ -44,11 +79,51 @@ export interface MarkdownConfig {
   body: string
 }
 
+export type SeriesSort = "none" | "x" | "value_desc" | "value_asc"
+export type XFormat = "auto" | "text" | "date" | "month" | "datetime"
+
+/** A bar or line chart: one series per y column against one value axis. */
+export interface SeriesConfig extends ValueFormat {
+  xColumn: string
+  yColumns: string[]
+  stacked: boolean
+  /** Lines keep result order or follow x; bars may also follow the row's total. */
+  sort: SeriesSort
+  xFormat: XFormat
+}
+
+export type ThresholdStatus = "good" | "warning" | "critical"
+
+/** One value from the first row on a scale; it takes the status of the highest threshold it reaches. */
+export interface GaugeConfig extends ValueFormat {
+  valueColumn: string
+  min: number
+  max: number
+  thresholds: { value: number; status: ThresholdStatus }[]
+}
+
+export interface TickerConfig extends ValueFormat {
+  labelColumn: string
+  valueColumn: string
+  deltaColumn: string | null
+}
+
+export interface SankeyConfig {
+  sourceColumn: string
+  targetColumn: string
+  valueColumn: string
+}
+
 /** A panel's kind with its config. */
 export type PanelDefinition =
   | { kind: "number"; config: NumberConfig }
   | { kind: "table"; config: TableConfig }
   | { kind: "markdown"; config: MarkdownConfig }
+  | { kind: "bar"; config: SeriesConfig }
+  | { kind: "line"; config: SeriesConfig }
+  | { kind: "gauge"; config: GaugeConfig }
+  | { kind: "ticker"; config: TickerConfig }
+  | { kind: "sankey"; config: SankeyConfig }
 
 export interface Dashboard {
   id: string
@@ -57,6 +132,8 @@ export interface Dashboard {
   description: string
   visibility: Visibility
   version: number
+  /** Increases with every layout save. */
+  layoutVersion: number
   createdBy: Author | null
   updatedBy: Author | null
   createdAt: string
@@ -99,21 +176,51 @@ export type PanelData =
   | { state: "private" }
   | { state: "available"; savedQuery: PanelSavedQuery; latestRun: PanelRun | null }
 
+export interface RefreshFailure {
+  code: string
+  message: string
+  at: string
+}
+
+/** How current a query panel is; the panel keeps showing its last good result. */
+export type PanelStatus =
+  | { state: "fresh"; lastSuccessAt: string }
+  /** since is null while it waits its turn. */
+  | { state: "refreshing"; since: string | null; lastSuccessAt: string | null }
+  | { state: "failed"; failure: RefreshFailure; lastSuccessAt: string | null }
+  | { state: "stale"; reason: "cancelled" | "not_run"; lastSuccessAt: string | null }
+
 export type DashboardPanel = PanelDefinition & {
   id: string
   /** "" shows the saved query's name (or nothing, for Markdown). */
   title: string
   savedQueryId: string | null
-  position: number
+  layout: PanelBox
   version: number
   createdAt: string
   updatedAt: string
   /** Null for Markdown panels. */
   data: PanelData | null
+  /** Null for Markdown panels and panels whose saved query the viewer cannot read. */
+  status: PanelStatus | null
 }
 
 export interface DashboardDetail extends Dashboard {
+  /** Top to bottom, then left to right. */
   panels: DashboardPanel[]
+  refresh: { active: boolean; startedAt: string | null }
+}
+
+/** A dashboard's refresh, if one is running, with every panel's status. */
+export interface DashboardRefresh {
+  active: boolean
+  startedAt: string | null
+  panels: { id: string; status: PanelStatus | null }[]
+}
+
+export interface SaveLayoutInput {
+  version: number
+  boxes: ({ panelId: string } & PanelBox)[]
 }
 
 export interface CreateDashboardInput {
@@ -129,14 +236,14 @@ export interface UpdateDashboardInput {
   visibility?: Visibility
 }
 
+/** A query panel's definition with its saved query, or a Markdown panel's. */
 export type PanelInput =
-  | { kind: "number"; title: string; savedQueryId: string; config: NumberConfig }
-  | { kind: "table"; title: string; savedQueryId: string; config: TableConfig }
-  | { kind: "markdown"; title: string; config: MarkdownConfig }
+  | ({ title: string } & Extract<PanelDefinition, { kind: "markdown" }>)
+  | ({ title: string; savedQueryId: string } & Exclude<PanelDefinition, { kind: "markdown" }>)
 
 export type UpdatePanelInput = { version: number } & Partial<{
   kind: PanelKind
   title: string
   savedQueryId: string
-  config: NumberConfig | TableConfig | MarkdownConfig
+  config: PanelDefinition["config"]
 }>

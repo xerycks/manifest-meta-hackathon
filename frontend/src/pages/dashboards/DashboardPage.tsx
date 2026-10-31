@@ -1,19 +1,20 @@
-import { ArrowLeft, Lock, Pencil, Plus } from "lucide-react"
+import { ArrowLeft, Lock, Pencil, Plus, RefreshCw, Square } from "lucide-react"
 import { useEffect, useState } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
-import { useDashboard, useDeleteDashboard, useReorderPanels } from "@/entities/dashboards/api.ts"
-import { canEditDashboard, movedIds } from "@/entities/dashboards/panel-config.ts"
+import { useDashboard, useDeleteDashboard } from "@/entities/dashboards/api.ts"
+import { canEditDashboard } from "@/entities/dashboards/panel-config.ts"
 import { DASHBOARD_LIMITS, type DashboardDetail, type DashboardPanel } from "@/entities/dashboards/types.ts"
+import { DashboardCanvas } from "@/features/dashboard/DashboardCanvas.tsx"
 import { DashboardForm } from "@/features/dashboard/DashboardForm.tsx"
 import { DashboardPanelCard } from "@/features/dashboard/DashboardPanelCard.tsx"
 import { PanelDialog } from "@/features/dashboard/PanelDialog.tsx"
+import { useDashboardRefresh } from "@/features/dashboard/use-dashboard-refresh.ts"
 import { ApiError } from "@/shared/api/client.ts"
 import { useSessionContext } from "@/shared/api/auth.ts"
 import { apiErrorMessage } from "@/shared/lib/draft.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
-import { cn } from "@/shared/lib/cn.ts"
 import { Badge } from "@/shared/ui/badge.tsx"
 import { Button } from "@/shared/ui/button.tsx"
 import { Card } from "@/shared/ui/card.tsx"
@@ -74,7 +75,87 @@ function DeleteDashboard({ workspaceId, dashboard }: { workspaceId: string; dash
   )
 }
 
-/** One dashboard: its panels in a responsive grid, with editing for its creator and owners and admins. */
+/** Whether a refresh could run the panel's saved query from here. */
+function refreshable(panel: DashboardPanel): boolean {
+  return panel.data?.state === "available" && !panel.data.savedQuery.needsValues
+}
+
+/**
+ * The panels on their canvas with Refresh all: every distinct saved query
+ * runs once, each panel shows its own progress, and the refresh can be
+ * cancelled.
+ */
+function Panels({
+  workspaceId,
+  dashboard,
+  readAt,
+  canEdit,
+  onEdit,
+  onNotice,
+}: {
+  workspaceId: string
+  dashboard: DashboardDetail
+  readAt: number
+  canEdit: boolean
+  onEdit: (panel: DashboardPanel) => void
+  onNotice: (message: string) => void
+}) {
+  const refresh = useDashboardRefresh(workspaceId, dashboard, readAt)
+  const anyRefreshable = dashboard.panels.some(refreshable)
+
+  return (
+    <>
+      {anyRefreshable && (
+        <div className="flex flex-wrap items-center gap-2">
+          {refresh.active ? (
+            <>
+              <p role="status" className="flex items-center gap-2 text-sm text-(--muted)">
+                <span
+                  aria-hidden
+                  className="size-4 animate-spin rounded-full border-2 border-(--border) border-t-(--accent) motion-reduce:animate-none"
+                />
+                Refreshing {refresh.refreshingCount === 1 ? "1 panel" : `${refresh.refreshingCount} panels`}…
+              </p>
+              <Button variant="secondary" disabled={refresh.cancelling} onClick={refresh.cancel}>
+                <Square aria-hidden className="size-4" />
+                {refresh.cancelling ? "Cancelling…" : "Cancel refresh"}
+              </Button>
+            </>
+          ) : (
+            <Button variant="secondary" disabled={refresh.starting} onClick={() => refresh.start()}>
+              <RefreshCw aria-hidden className="size-4" />
+              {refresh.starting ? "Starting…" : "Refresh all"}
+            </Button>
+          )}
+        </div>
+      )}
+      {refresh.error && (
+        <FailureNotice title="Refresh not started" message={apiErrorMessage(refresh.error)} />
+      )}
+      <DashboardCanvas
+        workspaceId={workspaceId}
+        dashboard={dashboard}
+        canEdit={canEdit}
+        renderPanel={(panel, moveHandle) => (
+          <DashboardPanelCard
+            workspaceId={workspaceId}
+            dashboardId={dashboard.id}
+            panel={panel}
+            status={refresh.statuses.get(panel.id) ?? panel.status}
+            canEdit={canEdit}
+            refreshPending={refresh.starting}
+            onRefresh={() => refresh.start([panel.id])}
+            onEdit={() => onEdit(panel)}
+            onAdded={onNotice}
+            moveHandle={moveHandle}
+          />
+        )}
+      />
+    </>
+  )
+}
+
+/** One dashboard: its panels on a grid canvas, with editing for its creator and owners and admins. */
 export function DashboardPage() {
   const { dashboardId = "" } = useParams()
   return <DashboardView key={dashboardId} dashboardId={dashboardId} />
@@ -86,7 +167,6 @@ function DashboardView({ dashboardId }: { dashboardId: string }) {
   const location = useLocation()
   const navigate = useNavigate()
   const dashboard = useDashboard(session.workspaceId, dashboardId)
-  const reorder = useReorderPanels(session.workspaceId, dashboardId)
   const [editing, setEditing] = useState(false)
   // The panel dialog: a panel to edit, or "new" to add one.
   const [dialog, setDialog] = useState<DashboardPanel | "new" | null>(null)
@@ -101,18 +181,6 @@ function DashboardView({ dashboardId }: { dashboardId: string }) {
   useEffect(() => {
     if (location.state) navigate(location.pathname, { replace: true, state: null })
   }, [location.state, location.pathname, navigate])
-
-  // Moves wait for the previous one; buttons stay enabled so they keep focus.
-  function move(panels: DashboardPanel[], index: number, offset: -1 | 1): boolean {
-    const order = movedIds(
-      panels.map((panel) => panel.id),
-      index,
-      offset,
-    )
-    if (reorder.isPending || !order) return false
-    reorder.mutate(order)
-    return true
-  }
 
   return (
     <div className="space-y-6">
@@ -226,35 +294,26 @@ function DashboardView({ dashboardId }: { dashboardId: string }) {
               one to add another.
             </p>
           )}
-          {reorder.error && <FailureNotice title="Not moved" message={apiErrorMessage(reorder.error)} />}
 
           {data.panels.length === 0 ? (
             <EmptyState
               title="No panels yet"
               description={
                 canEdit
-                  ? "Add a number or table from a saved query's latest result, or a note in Markdown."
+                  ? "Add a number, table, or chart from a saved query's latest result, or a note in Markdown."
                   : "Nothing has been added to this dashboard yet."
               }
               action={canEdit ? <Button onClick={() => setDialog("new")}>Add a panel</Button> : undefined}
             />
           ) : (
-            <ol aria-label="Panels" className="grid gap-4 lg:grid-cols-2">
-              {data.panels.map((panel, index) => (
-                <li key={panel.id} className={cn("min-w-0", panel.kind === "table" && "lg:col-span-2")}>
-                  <DashboardPanelCard
-                    workspaceId={session.workspaceId as string}
-                    dashboardId={data.id}
-                    panel={panel}
-                    index={index}
-                    count={data.panels.length}
-                    canEdit={canEdit}
-                    onEdit={() => setDialog(panel)}
-                    onMove={(offset) => move(data.panels, index, offset)}
-                  />
-                </li>
-              ))}
-            </ol>
+            <Panels
+              workspaceId={session.workspaceId}
+              dashboard={data}
+              readAt={dashboard.dataUpdatedAt}
+              canEdit={canEdit}
+              onEdit={(panel) => setDialog(panel)}
+              onNotice={setNotice}
+            />
           )}
         </>
       )}

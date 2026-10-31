@@ -1,17 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 
 import { savedQueriesKey } from "@/entities/saved-queries/api.ts"
-import type { SavedQueryRun } from "@/entities/saved-queries/types.ts"
 import { apiRequest } from "@/shared/api/client.ts"
 import { retryServerErrors } from "@/shared/api/retry.ts"
 import { workspacePath } from "@/shared/api/workspace-scope.ts"
 
+import { refreshUnderway } from "./refresh-state.ts"
 import type {
   CreateDashboardInput,
   DashboardDetail,
   DashboardList,
   DashboardPanel,
+  DashboardRefresh,
   PanelInput,
+  SaveLayoutInput,
   UpdateDashboardInput,
   UpdatePanelInput,
 } from "./types.ts"
@@ -20,6 +22,11 @@ const dashboardsKey = (workspaceId: string | null) => ["dashboards", workspaceId
 const listKey = (workspaceId: string | null) => [...dashboardsKey(workspaceId), "list"] as const
 const dashboardKey = (workspaceId: string | null, id: string) =>
   [...dashboardsKey(workspaceId), "item", id] as const
+const refreshKey = (workspaceId: string | null, id: string) =>
+  [...dashboardKey(workspaceId, id), "refresh"] as const
+
+/** How often a refreshing dashboard asks for progress. */
+const PROGRESS_INTERVAL_MS = 1_000
 
 function requireWorkspace(workspaceId: string | null): string {
   if (!workspaceId) throw new Error("Select a workspace first")
@@ -162,44 +169,79 @@ export function useDeletePanel(workspaceId: string | null, dashboardId: string) 
   )
 }
 
-/** Sends every panel id in the new order; a 409 means panels changed meanwhile, and the reread shows them. */
-export function useReorderPanels(workspaceId: string | null, dashboardId: string) {
+/**
+ * Saves every panel's box. A 409 means the layout or the panels changed
+ * meanwhile; the dashboard is reread so the page shows the current layout.
+ */
+export function useSaveLayout(workspaceId: string | null, dashboardId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (panelIds: string[]) =>
-      apiRequest<DashboardDetail>(itemPath(requireWorkspace(workspaceId), dashboardId, "/panels/order"), {
+    mutationFn: (input: SaveLayoutInput) =>
+      apiRequest<DashboardDetail>(itemPath(requireWorkspace(workspaceId), dashboardId, "/layout"), {
         method: "PUT",
-        body: { panelIds },
+        body: input,
         workspaceId,
       }),
-    onSuccess: async (saved) => {
-      queryClient.setQueryData(dashboardKey(workspaceId, dashboardId), saved)
-      await queryClient.invalidateQueries({ queryKey: listKey(workspaceId) })
-    },
+    onSuccess: (saved) => queryClient.setQueryData(dashboardKey(workspaceId, dashboardId), saved),
     onError: () => queryClient.invalidateQueries({ queryKey: dashboardKey(workspaceId, dashboardId) }),
   })
 }
 
 /**
- * Runs a panel's saved query with its defaults through the saved query's own
- * run route, then rereads the dashboard so the panel shows the new latest
- * result. Aborting `signal` closes the request, which stops the query.
+ * The dashboard's refresh progress, asked for every second while a refresh
+ * or a panel's run is under way: as the dashboard read says (`underway`),
+ * or as this query's own last answer, or a refresh just started, says.
  */
-export function useRunPanel(workspaceId: string | null, dashboardId: string) {
+export function useRefreshProgress(workspaceId: string | null, dashboardId: string, underway: boolean) {
+  return useQuery<DashboardRefresh, Error, DashboardRefresh, ReturnType<typeof refreshKey>>({
+    queryKey: refreshKey(workspaceId, dashboardId),
+    enabled: (query) =>
+      workspaceId !== null &&
+      (underway || (query.state.data !== undefined && refreshUnderway(query.state.data))),
+    queryFn: ({ signal }) =>
+      apiRequest<DashboardRefresh>(itemPath(workspaceId as string, dashboardId, "/refresh"), {
+        signal,
+        workspaceId,
+      }),
+    refetchInterval: (query) =>
+      query.state.data && !refreshUnderway(query.state.data) ? false : PROGRESS_INTERVAL_MS,
+    retry: retryServerErrors,
+  })
+}
+
+/** Rereads the dashboard (new results and statuses) and the saved queries whose runs moved. */
+export function useRefreshedDashboard(workspaceId: string | null, dashboardId: string) {
+  const queryClient = useQueryClient()
+  return () =>
+    Promise.all([
+      queryClient.invalidateQueries({ queryKey: dashboardKey(workspaceId, dashboardId), exact: true }),
+      queryClient.invalidateQueries({ queryKey: savedQueriesKey(workspaceId) }),
+    ])
+}
+
+/** Refreshes every panel, or the listed ones; answers at once with the progress, which is then polled. */
+export function useStartRefresh(workspaceId: string | null, dashboardId: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: ({ savedQueryId, signal }: { savedQueryId: string; signal: AbortSignal }) =>
-      apiRequest<SavedQueryRun>(
-        workspacePath(
-          requireWorkspace(workspaceId),
-          `/saved-queries/${encodeURIComponent(savedQueryId)}/run`,
-        ),
-        { method: "POST", body: { parameters: {} }, workspaceId, signal },
-      ),
-    onSettled: () =>
-      Promise.all([
-        queryClient.invalidateQueries({ queryKey: dashboardKey(workspaceId, dashboardId) }),
-        queryClient.invalidateQueries({ queryKey: savedQueriesKey(workspaceId) }),
-      ]),
+    mutationFn: (panelIds?: string[]) =>
+      apiRequest<DashboardRefresh>(itemPath(requireWorkspace(workspaceId), dashboardId, "/refresh"), {
+        method: "POST",
+        body: panelIds ? { panelIds } : {},
+        workspaceId,
+      }),
+    onSuccess: (progress) => queryClient.setQueryData(refreshKey(workspaceId, dashboardId), progress),
+  })
+}
+
+/** Cancels the dashboard's refresh; answers once its queries have stopped. */
+export function useCancelRefresh(workspaceId: string | null, dashboardId: string) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      apiRequest<DashboardRefresh>(itemPath(requireWorkspace(workspaceId), dashboardId, "/refresh"), {
+        method: "DELETE",
+        workspaceId,
+      }),
+    onSuccess: (progress) => queryClient.setQueryData(refreshKey(workspaceId, dashboardId), progress),
   })
 }

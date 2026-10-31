@@ -5,6 +5,10 @@ import type { QueryResult } from "@/entities/queries/types.ts"
 import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
 import { Markdown } from "@/shared/ui/markdown.tsx"
 
+import { GaugePanel } from "./charts/GaugePanel.tsx"
+import { SankeyPanel } from "./charts/SankeyPanel.tsx"
+import { SeriesPanel } from "./charts/SeriesPanel.tsx"
+import { TickerPanel } from "./charts/TickerPanel.tsx"
 import { describeNumber } from "./number-format.ts"
 import { columnProblem, numberCells, shownResult } from "./panel-config.ts"
 import type { NumberConfig, PanelDefinition } from "./types.ts"
@@ -48,9 +52,10 @@ function NumberValue({ config, result }: { config: NumberConfig; result: QueryRe
 }
 
 /**
- * A panel's content: a Markdown panel's text, or a query panel's number or
- * table from a result. A config that no longer fits the result's columns
- * says so instead of showing something wrong.
+ * A panel's content: a Markdown panel's text, or a query panel's number,
+ * table, or chart from a result, filling the space it is given. A config
+ * that no longer fits the result's columns says so instead of showing
+ * something wrong.
  */
 export function PanelBody({
   panel,
@@ -60,7 +65,7 @@ export function PanelBody({
   panel: PanelDefinition
   /** The saved query's latest result; query panels show nothing without one. */
   result: QueryResult | null
-  /** Names the table for assistive technology. */
+  /** Names tables and charts for assistive technology. */
   label: string
 }) {
   if (panel.kind === "markdown") return <Markdown>{panel.config.body}</Markdown>
@@ -74,7 +79,20 @@ export function PanelBody({
       />
     )
   }
-  if (panel.kind === "number") return <NumberValue config={panel.config} result={result} />
   const shown = shownResult(panel, result)
-  return <ResultTable result={shown} partial={shown.rows.length < shown.rowCount} label={label} />
+  switch (panel.kind) {
+    case "number":
+      return <NumberValue config={panel.config} result={result} />
+    case "table":
+      return <ResultTable result={shown} partial={shown.rows.length < shown.rowCount} label={label} />
+    case "bar":
+    case "line":
+      return <SeriesPanel kind={panel.kind} config={panel.config} result={shown} label={label} />
+    case "gauge":
+      return <GaugePanel config={panel.config} result={shown} />
+    case "ticker":
+      return <TickerPanel config={panel.config} result={shown} label={label} />
+    case "sankey":
+      return <SankeyPanel config={panel.config} result={shown} label={label} />
+  }
 }

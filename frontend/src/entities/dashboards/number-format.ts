@@ -46,6 +46,11 @@ export function shiftDecimal(value: Decimal, places: number): Decimal {
   return scale >= 0 ? { units: value.units, scale } : { units: value.units * pow10(-scale), scale: 0 }
 }
 
+export function addDecimal(a: Decimal, b: Decimal): Decimal {
+  const scale = Math.max(a.scale, b.scale)
+  return { units: a.units * pow10(scale - a.scale) + b.units * pow10(scale - b.scale), scale }
+}
+
 export function subtractDecimal(a: Decimal, b: Decimal): Decimal {
   const scale = Math.max(a.scale, b.scale)
   return { units: a.units * pow10(scale - a.scale) - b.units * pow10(scale - b.scale), scale }

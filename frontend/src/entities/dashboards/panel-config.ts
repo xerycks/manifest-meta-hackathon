@@ -12,6 +12,23 @@ export const PANEL_KIND_LABELS: Record<PanelKind, string> = {
   number: "Number",
   table: "Table",
   markdown: "Text (Markdown)",
+  bar: "Bar chart",
+  line: "Line chart",
+  gauge: "Gauge",
+  ticker: "Ticker",
+  sankey: "Sankey diagram",
+}
+
+/** How a message names each kind of panel. */
+const PANEL_NAMES: Record<PanelKind, string> = {
+  number: "a number panel",
+  table: "a table",
+  markdown: "a Markdown panel",
+  bar: "a bar chart",
+  line: "a line chart",
+  gauge: "a gauge",
+  ticker: "a ticker",
+  sankey: "a Sankey diagram",
 }
 
 /** Kinds a number panel can show; mixed MongoDB fields are "unknown" and checked when shown. */
@@ -30,46 +47,102 @@ function firstByName(columns: ResultColumn[]): Map<string, number> {
   return indexes
 }
 
-function namedColumns(panel: PanelDefinition): string[] {
-  if (panel.kind === "number") {
-    const { valueColumn, comparisonColumn } = panel.config
-    return comparisonColumn === null ? [valueColumn] : [valueColumn, comparisonColumn]
+/** A column a panel's config names: the config field, the column, and whether it must hold numbers. */
+interface NamedColumn {
+  field: string
+  column: string
+  numeric: boolean
+}
+
+const named = (field: string, column: string | null, numeric: boolean): NamedColumn[] =>
+  column === null || column === "" ? [] : [{ field, column, numeric }]
+
+/** The columns a panel's config names, in the order its result carries them. */
+function namedColumns(panel: PanelDefinition): NamedColumn[] {
+  switch (panel.kind) {
+    case "number":
+      return [
+        ...named("valueColumn", panel.config.valueColumn, true),
+        ...named("comparisonColumn", panel.config.comparisonColumn, true),
+      ]
+    case "table":
+      return (panel.config.columns ?? []).flatMap((column) => named("columns", column, false))
+    case "markdown":
+      return []
+    case "bar":
+    case "line":
+      return [
+        ...named("xColumn", panel.config.xColumn, false),
+        ...panel.config.yColumns.flatMap((column) => named("yColumns", column, true)),
+      ]
+    case "gauge":
+      return named("valueColumn", panel.config.valueColumn, true)
+    case "ticker":
+      return [
+        ...named("labelColumn", panel.config.labelColumn, false),
+        ...named("valueColumn", panel.config.valueColumn, true),
+        ...named("deltaColumn", panel.config.deltaColumn, true),
+      ]
+    case "sankey":
+      return [
+        ...named("sourceColumn", panel.config.sourceColumn, false),
+        ...named("targetColumn", panel.config.targetColumn, false),
+        ...named("valueColumn", panel.config.valueColumn, true),
+      ]
   }
-  return panel.kind === "table" ? (panel.config.columns ?? []) : []
 }
 
 /**
  * Mirrors the server: the first column a panel's config names that does not
- * fit a result's columns (it is not there, or a number panel's column is not
- * numeric) and why, or null when the config fits.
+ * fit a result's columns (it is not there, or one that carries values does
+ * not hold numbers) and why, or null when the config fits.
  */
 export function columnProblem(
   panel: PanelDefinition,
   columns: ResultColumn[],
-): { column: string; message: string } | null {
+): { field: string; column: string; message: string } | null {
   const indexes = firstByName(columns)
-  for (const name of namedColumns(panel)) {
+  for (const { field, column: name, numeric } of namedColumns(panel)) {
     const index = indexes.get(name)
     const column = index === undefined ? undefined : columns[index]
-    if (!column) return { column: name, message: `The result has no column “${name}”.` }
-    if (panel.kind === "number" && !holdsNumbers(column)) {
+    if (!column) return { field, column: name, message: `The result has no column “${name}”.` }
+    if (numeric && !holdsNumbers(column)) {
       return {
+        field,
         column: name,
-        message: `“${name}” holds ${column.kind} values; a number panel needs a column of numbers.`,
+        message: `“${name}” holds ${column.kind} values; ${PANEL_NAMES[panel.kind]} needs a column of numbers.`,
       }
     }
   }
   return null
 }
 
-/** The part of a result a panel shows, as the server cuts it: its columns, and the first row or 100 rows. */
+/** The leading rows of its result a panel shows, as the server cuts them. */
+export function panelRows(kind: PanelKind): number {
+  switch (kind) {
+    case "number":
+    case "gauge":
+      return 1
+    case "table":
+    case "markdown":
+      return DASHBOARD_LIMITS.tableRows
+    case "ticker":
+      return DASHBOARD_LIMITS.tickerRows
+    case "bar":
+    case "line":
+    case "sankey":
+      return DASHBOARD_LIMITS.chartRows
+  }
+}
+
+/** The part of a result a panel shows, as the server cuts it: its columns and its leading rows. */
 export function shownResult(panel: PanelDefinition, result: QueryResult): QueryResult {
   const byName = firstByName(result.columns)
   const indexes =
     panel.kind === "table" && panel.config.columns === null
       ? result.columns.map((_column, index) => index)
-      : namedColumns(panel).flatMap((name) => byName.get(name) ?? [])
-  const maxRows = panel.kind === "number" ? 1 : DASHBOARD_LIMITS.tableRows
+      : namedColumns(panel).flatMap(({ column }) => byName.get(column) ?? [])
+  const maxRows = panelRows(panel.kind)
   return {
     ...result,
     columns: indexes.flatMap((index) => result.columns[index] ?? []),
