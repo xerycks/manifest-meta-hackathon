@@ -3,6 +3,13 @@ import { randomBytes } from "node:crypto"
 import express, { type Express, type Request, type Response } from "express"
 import type { Pool } from "pg"
 
+import { agentLimits, createModelProvider } from "../agent/config.js"
+import type { ModelProvider } from "../agent/provider.js"
+import { AgentRunsRepository } from "../agent/repository.js"
+import { agentRouter, type AgentDeps } from "../agent/routes.js"
+import { AgentRunner } from "../agent/runner.js"
+import { AgentService } from "../agent/service.js"
+import { createAgentTools } from "../agent/tools.js"
 import { createGoogleProvider, type GoogleProvider } from "../auth/google.js"
 import {
   GoogleLoginAttemptsRepository,
@@ -55,6 +62,10 @@ export interface AppDeps {
   refreshes?: RefreshRunner
   /** Running source queries; pass it in to abort them on shutdown. */
   queries?: QueryRunner
+  /** Questions being answered; pass it in to abort them on shutdown. */
+  agents?: AgentRunner
+  /** Replaces the provider configured by AGENT_PROVIDER (null: none, so agent routes answer 503). */
+  modelProvider?: ModelProvider | null
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
@@ -72,6 +83,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let knowledgeDeps: KnowledgeDeps | null = null
   let searchDeps: SearchDeps | null = null
   let queriesDeps: QueriesDeps | null = null
+  let agentDeps: AgentDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
     const workspaces = new WorkspacesRepository(pool)
@@ -86,12 +98,8 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
                 env.GOOGLE_REDIRECT_URI ?? `http://${env.HOST}:${env.PORT}/api/v1/auth/google/callback`,
             })
           : null
-    workspaceDeps = {
-      workspaces,
-      settings: new WorkspaceSettingsRepository(pool),
-      auth,
-      sessionSecret,
-    }
+    const settings = new WorkspaceSettingsRepository(pool)
+    workspaceDeps = { workspaces, settings, auth, sessionSecret }
     authDeps = {
       auth,
       attempts: new GoogleLoginAttemptsRepository(pool),
@@ -127,24 +135,45 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       editor: manifests ? new ManifestEditorService(new ManifestEditsRepository(pool)) : null,
     }
     // Knowledge and search read only application storage, so they work without the key.
+    const knowledge = new KnowledgeRepository(pool)
     knowledgeDeps = {
       workspaces,
       auth,
       sessionSecret,
-      knowledge: new KnowledgeService(new KnowledgeRepository(pool), connectionsRepository),
+      knowledge: new KnowledgeService(knowledge, connectionsRepository),
     }
-    searchDeps = { workspaces, auth, search: new SearchRepository(pool) }
-    queriesDeps = {
+    const search = new SearchRepository(pool)
+    searchDeps = { workspaces, auth, search }
+    const executions = new QueryExecutionsRepository(pool)
+    const executor = connections
+      ? new QueryExecutor(executions, connections, manifestsRepository, deps.queries ?? new QueryRunner())
+      : null
+    queriesDeps = { workspaces, auth, sessionSecret, executor }
+    // Questions read metadata from storage; queries need the key, and tools say so without it.
+    const provider = deps.modelProvider !== undefined ? deps.modelProvider : createModelProvider(env)
+    agentDeps = {
       workspaces,
       auth,
       sessionSecret,
-      executor: connections
-        ? new QueryExecutor(
-            new QueryExecutionsRepository(pool),
-            connections,
-            manifestsRepository,
-            deps.queries ?? new QueryRunner(),
-          )
+      agent: provider
+        ? new AgentService({
+            runs: new AgentRunsRepository(pool),
+            connections: connectionsRepository,
+            manifests: manifestsRepository,
+            knowledge,
+            settings,
+            tools: createAgentTools({
+              connections: connectionsRepository,
+              manifests: manifestsRepository,
+              knowledge,
+              search,
+              executor,
+              executions,
+            }),
+            provider,
+            runner: deps.agents ?? new AgentRunner(),
+            limits: agentLimits(env),
+          })
         : null,
     }
   }
@@ -174,6 +203,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", knowledgeRouter(knowledgeDeps))
   app.use("/api/v1", searchRouter(searchDeps))
   app.use("/api/v1", queriesRouter(queriesDeps))
+  app.use("/api/v1", agentRouter(agentDeps))
 
   app.use(notFoundHandler)
   app.use(errorHandler)

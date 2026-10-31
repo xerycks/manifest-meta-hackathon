@@ -48,6 +48,16 @@ const envSchema = z
 
     // Local development sign-in. Forced off in production regardless of value.
     ALLOW_DEV_LOGIN: booleanString.default(false),
+
+    // Agent runtime (Cycle 10). "anthropic" needs ANTHROPIC_API_KEY; "scripted"
+    // is a labeled demo model for local walkthroughs without a key and is
+    // refused in production. Without a usable provider the agent endpoints
+    // answer 503 and everything else keeps working.
+    AGENT_PROVIDER: z.enum(["anthropic", "scripted"]).default("anthropic"),
+    AGENT_MODEL: z.string().trim().min(1).max(120).default("claude-opus-5-5"),
+    ANTHROPIC_API_KEY: z.string().min(1).optional(),
+    AGENT_MAX_STEPS: z.coerce.number().int().min(1).max(50).default(12),
+    AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(1_800_000).default(300_000),
   })
   .superRefine((env, ctx) => {
     if (Boolean(env.GOOGLE_CLIENT_ID) !== Boolean(env.GOOGLE_CLIENT_SECRET)) {
@@ -62,6 +72,13 @@ const envSchema = z
         code: "custom",
         path: ["SESSION_SECRET"],
         message: "SESSION_SECRET is required in production when storage is configured",
+      })
+    }
+    if (env.NODE_ENV === "production" && env.AGENT_PROVIDER === "scripted") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["AGENT_PROVIDER"],
+        message: "the scripted demo model is not allowed in production",
       })
     }
     if (env.NODE_ENV === "production" && env.DATABASE_URL && !env.CONNECTION_ENCRYPTION_KEY) {

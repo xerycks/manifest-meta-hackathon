@@ -15,7 +15,10 @@ import type {
   TruncatedBy,
 } from "./schemas.js"
 
-/** Executions kept per workspace; older finished ones are pruned as new ones start. */
+/**
+ * Executions kept per workspace; older finished ones are pruned as new ones
+ * start. Pinned executions (cited by an answer) are kept on top of these.
+ */
 export const KEPT_EXECUTIONS = 200
 
 /** What an execution is about, fixed when it starts. */
@@ -107,7 +110,7 @@ export class QueryExecutionsRepository {
   /**
    * Records an execution that starts running, or one validation rejected.
    * Rejects with a unique violation (23505) when the id is already used in
-   * the workspace. Old finished executions are pruned first.
+   * the workspace. Old finished executions that are not pinned are pruned first.
    */
   async insert(
     start: ExecutionStart,
@@ -115,9 +118,9 @@ export class QueryExecutionsRepository {
   ): Promise<ExecutionRecord> {
     await this.pool.query(
       `DELETE FROM query_executions
-        WHERE workspace_id = $1 AND status <> 'running'
+        WHERE workspace_id = $1 AND status <> 'running' AND NOT pinned
           AND id NOT IN (
-            SELECT id FROM query_executions WHERE workspace_id = $1
+            SELECT id FROM query_executions WHERE workspace_id = $1 AND NOT pinned
              ORDER BY created_at DESC LIMIT ${KEPT_EXECUTIONS - 1})`,
       [start.workspaceId],
     )
@@ -187,6 +190,20 @@ export class QueryExecutionsRepository {
       [workspaceId, connectionId, id],
     )
     return firstRecord(rows)
+  }
+
+  /**
+   * Keeps succeeded executions out of history pruning, e.g. because an answer
+   * cites them. Returns the ids that are now pinned.
+   */
+  async pin(workspaceId: string, ids: string[]): Promise<string[]> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `UPDATE query_executions SET pinned = true
+        WHERE workspace_id = $1 AND id = ANY ($2::uuid[]) AND status = 'succeeded'
+        RETURNING id`,
+      [workspaceId, ids],
+    )
+    return rows.map((row) => row.id)
   }
 
   /** Recent executions on a source, newest first, without their rows. */

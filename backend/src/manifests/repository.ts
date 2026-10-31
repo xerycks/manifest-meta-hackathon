@@ -17,6 +17,7 @@ import {
 import type {
   ManifestObjectDetail,
   ManifestObjectSummary,
+  ManifestOutlineEntry,
   ManifestRefresh,
   RefreshCounts,
   RefreshPhase,
@@ -510,6 +511,61 @@ export class ManifestsRepository {
       present: row.present,
       lastSeenAt: row.last_seen_at.toISOString(),
     }))
+  }
+
+  /**
+   * Present objects in the given schemas with their authored label and row
+   * meaning, for compact overviews such as the agent's source context.
+   */
+  async outline(
+    workspaceId: string,
+    connectionId: string,
+    schemas: string[],
+    limit: number,
+  ): Promise<ManifestOutlineEntry[]> {
+    const { rows } = await this.pool.query<{
+      id: string
+      schema_name: string
+      object_name: string
+      kind: ManifestObjectKind
+      label: string | null
+      row_meaning: string | null
+      column_count: number
+    }>(
+      `SELECT o.id, o.schema_name, o.object_name, o.kind, o.label, o.row_meaning,
+              (SELECT count(*)::int FROM manifest_columns c
+                WHERE c.object_id = o.id AND c.present) AS column_count
+         FROM manifest_objects o
+        WHERE o.workspace_id = $1 AND o.connection_id = $2 AND o.present
+          AND o.schema_name = ANY ($3::text[])
+        ORDER BY o.schema_name, o.object_name
+        LIMIT $4`,
+      [workspaceId, connectionId, schemas, limit],
+    )
+    return rows.map((row) => ({
+      id: row.id,
+      schema: row.schema_name,
+      name: row.object_name,
+      kind: row.kind,
+      label: row.label,
+      rowMeaning: row.row_meaning,
+      columnCount: row.column_count,
+    }))
+  }
+
+  /** The id of an object by its schema (MongoDB: database) and name. */
+  async findObjectId(
+    workspaceId: string,
+    connectionId: string,
+    schema: string,
+    name: string,
+  ): Promise<string | null> {
+    const { rows } = await this.pool.query<{ id: string }>(
+      `SELECT id FROM manifest_objects
+        WHERE workspace_id = $1 AND connection_id = $2 AND schema_name = $3 AND object_name = $4`,
+      [workspaceId, connectionId, schema, name],
+    )
+    return rows[0]?.id ?? null
   }
 
   /** Names of present tables, views, and collections in the given schemas. */

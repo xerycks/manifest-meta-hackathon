@@ -1,3 +1,5 @@
+import { AgentRunsRepository } from "./agent/repository.js"
+import { AgentRunner } from "./agent/runner.js"
 import { loadEnv } from "./config/env.js"
 import { closeSourceAdapters, createSourceAdapters } from "./connections/adapters/index.js"
 import { ManifestsRepository } from "./manifests/repository.js"
@@ -18,8 +20,15 @@ if (pool) {
   if (interrupted > 0) console.warn(`Marked ${interrupted} interrupted manifest refresh(es) as failed.`)
   const queriesInterrupted = await new QueryExecutionsRepository(pool).failInterrupted()
   if (queriesInterrupted > 0) console.warn(`Marked ${queriesInterrupted} interrupted query(ies) as failed.`)
+  const runsInterrupted = await new AgentRunsRepository(pool).failInterrupted()
+  if (runsInterrupted > 0) console.warn(`Marked ${runsInterrupted} interrupted agent run(s) as failed.`)
   if (!env.CONNECTION_ENCRYPTION_KEY) {
     console.warn("CONNECTION_ENCRYPTION_KEY is not set — source connection endpoints will return 503.")
+  }
+  if (env.AGENT_PROVIDER === "scripted") {
+    console.warn("AGENT_PROVIDER=scripted — questions are answered by the scripted demo model (synthetic).")
+  } else if (!env.ANTHROPIC_API_KEY) {
+    console.warn("ANTHROPIC_API_KEY is not set — agent endpoints will return 503.")
   }
 } else {
   console.warn("DATABASE_URL is not set — workspace storage endpoints will return 503.")
@@ -28,7 +37,8 @@ if (pool) {
 const sources = createSourceAdapters()
 const refreshes = new RefreshRunner()
 const queries = new QueryRunner()
-const app = createApp(env, { pool, sources, refreshes, queries })
+const agents = new AgentRunner()
+const app = createApp(env, { pool, sources, refreshes, queries, agents })
 
 const server = app.listen(env.PORT, env.HOST, () => {
   console.log(`manifest-backend listening on http://${env.HOST}:${env.PORT}`)
@@ -36,8 +46,8 @@ const server = app.listen(env.PORT, env.HOST, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    // Running refreshes and queries stop now and record why; pools close once they have.
-    const stopped = Promise.all([refreshes.shutdown(), queries.shutdown()])
+    // Running refreshes, queries, and agent runs stop now and record why; pools close once they have.
+    const stopped = Promise.all([refreshes.shutdown(), queries.shutdown(), agents.shutdown()])
     server.close(() => {
       void stopped
         .then(() => Promise.allSettled([closeSourceAdapters(sources), pool?.end()]))

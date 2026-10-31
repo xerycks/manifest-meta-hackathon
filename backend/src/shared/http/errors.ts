@@ -11,6 +11,8 @@ export type ErrorCode =
   | "SOURCE_CONNECTION_FAILED"
   | "QUERY_REJECTED"
   | "QUERY_BUSY"
+  | "AGENT_NOT_CONFIGURED"
+  | "AGENT_BUSY"
   | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
 
@@ -105,6 +107,21 @@ export class AppError extends Error {
   /** Too many queries are running; the request was not started and may be retried. */
   static queryBusy(message: string, retryAfterSeconds: number): AppError {
     return new AppError(429, "QUERY_BUSY", message, { retryAfterSeconds }, {
+      "Retry-After": String(retryAfterSeconds),
+    })
+  }
+
+  static agentNotConfigured(): AppError {
+    return new AppError(
+      503,
+      "AGENT_NOT_CONFIGURED",
+      "No model provider is configured for answering questions. Set ANTHROPIC_API_KEY (or AGENT_PROVIDER=scripted for the local demo model) and restart the backend.",
+    )
+  }
+
+  /** Too many questions are being answered; the run was not started and may be retried. */
+  static agentBusy(message: string, retryAfterSeconds: number): AppError {
+    return new AppError(429, "AGENT_BUSY", message, { retryAfterSeconds }, {
       "Retry-After": String(retryAfterSeconds),
     })
   }

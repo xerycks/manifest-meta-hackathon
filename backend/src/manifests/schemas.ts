@@ -52,6 +52,17 @@ export interface ManifestObjectSummary {
   lastSeenAt: string
 }
 
+/** A present object with its authored meaning, for compact overviews. */
+export interface ManifestOutlineEntry {
+  id: string
+  schema: string
+  name: string
+  kind: ManifestObjectKind
+  label: string | null
+  rowMeaning: string | null
+  columnCount: number
+}
+
 export interface ConnectionManifest {
   connectionId: string
   /** The connection's selected schemas, each with its objects (present ones first). */
