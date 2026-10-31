@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk"
 
+import type { TokenUsage } from "./contracts.js"
 import {
   ModelProviderError,
   UnparseableToolInput,
@@ -100,6 +101,27 @@ function stopReason(reason: Anthropic.Beta.BetaStopReason | null): StopReason {
   }
 }
 
+/**
+ * Tokens the turn used. With server-side fallbacks, the top-level usage covers
+ * only the attempt that produced the message, while `iterations` lists every
+ * attempt, declined ones included; so the iterations are summed when present.
+ * Cached and uncached prompt tokens count together: what each attempt read.
+ */
+export function turnUsage(usage: Anthropic.Beta.BetaUsage): TokenUsage {
+  const attempts = usage.iterations?.length ? usage.iterations : [usage]
+  return attempts.reduce<TokenUsage>(
+    (total, attempt) => ({
+      inputTokens:
+        total.inputTokens +
+        attempt.input_tokens +
+        (attempt.cache_creation_input_tokens ?? 0) +
+        (attempt.cache_read_input_tokens ?? 0),
+      outputTokens: total.outputTokens + attempt.output_tokens,
+    }),
+    { inputTokens: 0, outputTokens: 0 },
+  )
+}
+
 /** A safe message for a provider failure; the API's own text stays in the server log. */
 function providerFailure(error: InstanceType<typeof Anthropic.APIError>): ModelProviderError {
   if (error instanceof Anthropic.AuthenticationError || error instanceof Anthropic.PermissionDeniedError) {
@@ -167,21 +189,13 @@ export class AnthropicProvider implements ModelProvider {
     }
 
     const content = echoableContent(message.content)
-    const usage = message.usage
     return {
       text: content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join(""),
       toolCalls: content.flatMap((block) =>
         block.type === "tool_use" ? [{ id: block.id, name: block.name, input: block.input }] : [],
       ),
       stopReason: stopReason(message.stop_reason),
-      usage: {
-        // Cached and uncached prompt tokens together: what the turn read.
-        inputTokens:
-          usage.input_tokens +
-          (usage.cache_creation_input_tokens ?? 0) +
-          (usage.cache_read_input_tokens ?? 0),
-        outputTokens: usage.output_tokens,
-      },
+      usage: turnUsage(message.usage),
       providerContent: content,
     }
   }

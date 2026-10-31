@@ -18,5 +18,9 @@ export function createModelProvider(env: Env): ModelProvider | null {
 }
 
 export function agentLimits(env: Env): AgentLimits {
-  return { maxSteps: env.AGENT_MAX_STEPS, runTimeoutMs: env.AGENT_RUN_TIMEOUT_MS }
+  return {
+    maxSteps: env.AGENT_MAX_STEPS,
+    runTimeoutMs: env.AGENT_RUN_TIMEOUT_MS,
+    answerTimeoutMs: env.AGENT_ANSWER_TIMEOUT_MS,
+  }
 }

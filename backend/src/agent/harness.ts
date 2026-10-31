@@ -18,8 +18,12 @@ export const MAX_TOOL_CALLS_PER_TURN = 8
 const TOOL_CONCURRENCY = 2
 /** A turn whose tool input is not JSON is asked for again this many times in a row. */
 const UNPARSEABLE_RETRIES = 2
-/** Streamed text is recorded in pieces of about this many characters, up to a total per run. */
-const DELTA_CHARS = 160
+/**
+ * Streamed text is recorded in pieces: whenever this many characters or this
+ * much time has gathered, up to a total per run, so storage is not flooded.
+ */
+const DELTA_CHARS = 200
+const DELTA_MS = 50
 const STREAMED_CHARS = 100_000
 /** The stored transcript stays below this many bytes of JSON. */
 const TRANSCRIPT_BYTES = 1_000_000
@@ -129,32 +133,50 @@ async function executeCall(input: HarnessInput, call: ToolCall): Promise<CallOut
   }
 }
 
+const refused = (call: ToolCall, message: string): ToolResult => ({
+  callId: call.id,
+  content: `Error: ${message}`,
+  isError: true,
+})
+
 /**
  * Runs the turn's tool calls (a bounded number, a few at a time) and returns
- * their results in call order. submit_answer runs after the others, so the
- * run ends only once they are done; the first accepted answer wins.
+ * their results in call order. ask_user and then submit_answer run after the
+ * others, so the user is asked, or the run ends, only once they are done. One
+ * question per turn; an answer submitted alongside a question, or after an
+ * accepted one, is refused.
  */
 async function executeCalls(
   input: HarnessInput,
   calls: ToolCall[],
 ): Promise<{ results: ToolResult[]; answer?: AgentAnswer }> {
   const allowed = calls.slice(0, MAX_TOOL_CALLS_PER_TURN)
+  const last = (call: ToolCall) => call.name === "ask_user" || call.name === "submit_answer"
   const outcomes = new Map<string, ToolResult>()
   await eachLimited(
-    allowed.filter((call) => call.name !== "submit_answer"),
+    allowed.filter((call) => !last(call)),
     TOOL_CONCURRENCY,
     async (call) => {
       outcomes.set(call.id, (await executeCall(input, call)).result)
     },
   )
+  const questions = allowed.filter((call) => call.name === "ask_user")
+  for (const [index, call] of questions.entries()) {
+    outcomes.set(
+      call.id,
+      index === 0
+        ? (await executeCall(input, call)).result
+        : refused(call, "Ask one question at a time. Ask this one after the user has answered the first."),
+    )
+  }
   let answer: AgentAnswer | undefined
   for (const call of allowed.filter((entry) => entry.name === "submit_answer")) {
+    if (questions.length > 0) {
+      outcomes.set(call.id, refused(call, "Read the user's answer before submitting, then submit again."))
+      continue
+    }
     if (answer) {
-      outcomes.set(call.id, {
-        callId: call.id,
-        content: "Error: An answer was already submitted.",
-        isError: true,
-      })
+      outcomes.set(call.id, refused(call, "An answer was already submitted."))
       continue
     }
     const outcome = await executeCall(input, call)
@@ -163,11 +185,11 @@ async function executeCalls(
   }
   const results = calls.map(
     (call) =>
-      outcomes.get(call.id) ?? {
-        callId: call.id,
-        content: `Error: Too many tool calls in one turn (at most ${MAX_TOOL_CALLS_PER_TURN}). Make this call again in your next turn.`,
-        isError: true,
-      },
+      outcomes.get(call.id) ??
+      refused(
+        call,
+        `Too many tool calls in one turn (at most ${MAX_TOOL_CALLS_PER_TURN}). Make this call again in your next turn.`,
+      ),
   )
   return answer ? { results, answer } : { results }
 }
@@ -189,7 +211,10 @@ export async function runHarness(input: HarnessInput, progress: HarnessProgress)
     signal.throwIfAborted()
     progress.steps += 1
     let pending = ""
+    let timer: NodeJS.Timeout | undefined
     const flush = () => {
+      clearTimeout(timer)
+      timer = undefined
       if (pending) emit("answer.delta", { text: pending })
       pending = ""
     }
@@ -198,6 +223,7 @@ export async function runHarness(input: HarnessInput, progress: HarnessProgress)
       streamed += kept.length
       pending += kept
       if (pending.length >= DELTA_CHARS) flush()
+      else if (pending) timer ??= setTimeout(flush, DELTA_MS)
     }
     let turn
     try {

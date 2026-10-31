@@ -19,8 +19,16 @@ import type { QueryExecutor } from "../queries/service.js"
 import type { SearchRepository } from "../search/repository.js"
 import { AppError } from "../shared/http/errors.js"
 import { plainText, snippet } from "../shared/text.js"
-import { AGENT_LIMITS, type AgentAnswer, type AgentToolName } from "./contracts.js"
+import { textSlice } from "./attachments.js"
+import {
+  AGENT_LIMITS,
+  type AgentAnswer,
+  type AgentToolName,
+  type AttachmentSummary,
+  type Clarification,
+} from "./contracts.js"
 import type { ToolDefinition } from "./provider.js"
+import type { AgentRunsRepository } from "./repository.js"
 
 /** Characters of JSON a tool returns to the model at most (beyond fixed fields). */
 const OUTPUT_BUDGET = 12_000
@@ -35,6 +43,9 @@ const KNOWLEDGE_CHARS = 6_000
 const AGENT_QUERY_LIMITS = { maxRows: 1_000, timeoutMs: 30_000 } as const
 const BUSY_RETRIES = 2
 const BUSY_WAIT_MS = 1_500
+const SEARCH_HITS = 10
+/** Bytes of an attached file one read_attachment call returns, by default and at most. */
+const FILE_SLICE = { default: 8_000, min: 500, max: OUTPUT_BUDGET } as const
 
 /** A succeeded query of this run, kept so answers can cite it. */
 export interface RunExecution {
@@ -55,6 +66,10 @@ export interface ToolContext {
   /** Aborting it stops a running query on its source. */
   signal: AbortSignal
   executions: Map<string, RunExecution>
+  /** Files sent in this conversation, which read_attachment may open. */
+  attachments: AttachmentSummary[]
+  /** Pauses the run until the user answers; resolves with the answer. */
+  askUser(request: Omit<Clarification, "id">): Promise<string>
 }
 
 export interface ToolSuccess {
@@ -95,6 +110,7 @@ export interface ToolServices {
   /** Null without CONNECTION_ENCRYPTION_KEY: queries cannot run. */
   executor: QueryExecutor | null
   executions: QueryExecutionsRepository
+  runs: AgentRunsRepository
 }
 
 function inputError(name: string, error: z.ZodError): string {
@@ -161,13 +177,12 @@ function sampled(details: MongoFieldDetails): string {
 
 const end = (side: ManifestRelationship["from"]) => `${side.schema}.${side.name}(${side.columns.join(", ")})`
 
+const GONE =
+  "This source no longer exists (it may have been removed). Use list_sources to see the available sources."
+
 /** A query error for the model: the executor's safe message, or a plain one for a gone source. */
 function queryStartFailure(error: AppError): ToolError {
-  if (error.status === 404) {
-    return new ToolError(
-      "This source no longer exists (it may have been removed). Use list_sources to see the available sources.",
-    )
-  }
+  if (error.status === 404) return new ToolError(GONE)
   if (error.code === "QUERY_BUSY") {
     return new ToolError("Too many queries are running on this source right now. Try again in a moment.")
   }
@@ -211,12 +226,14 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
     describe: (input) => `Searching metadata for “${input.query}”`,
     async run(input, context) {
       if (input.connectionId) assertInScope(context, input.connectionId)
-      const results = await services.search.search(context.workspaceId, { q: input.query, limit: 10 })
-      const usable = (connectionId: string) =>
-        (!context.scope || context.scope.includes(connectionId)) &&
-        (!input.connectionId || input.connectionId === connectionId)
+      // Only the sources this call may use count toward the hit limit.
+      const results = await services.search.search(
+        context.workspaceId,
+        { q: input.query, limit: SEARCH_HITS },
+        input.connectionId ? [input.connectionId] : context.scope,
+      )
       const objects = results.objects
-        .filter((hit) => hit.present && usable(hit.connectionId))
+        .filter((hit) => hit.present)
         .map((hit) => ({
           connectionId: hit.connectionId,
           objectId: hit.objectId,
@@ -227,7 +244,7 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
           snippet: hit.snippet,
         }))
       const columns = results.columns
-        .filter((hit) => hit.present && usable(hit.connectionId))
+        .filter((hit) => hit.present)
         .map((hit) => ({
           connectionId: hit.connectionId,
           objectId: hit.objectId,
@@ -237,9 +254,11 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
           dataType: hit.dataType,
           snippet: hit.snippet,
         }))
-      const knowledge = results.knowledge
-        .filter((hit) => !hit.connection || usable(hit.connection.id))
-        .map((hit) => ({ entryId: hit.entryId, title: hit.title, snippet: hit.snippet }))
+      const knowledge = results.knowledge.map((hit) => ({
+        entryId: hit.entryId,
+        title: hit.title,
+        snippet: hit.snippet,
+      }))
       const third = Math.floor(OUTPUT_BUDGET / 3)
       const output = {
         objects: fitting(objects, third),
@@ -275,6 +294,8 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
       `Describing ${input.schema && input.name ? `${input.schema}.${input.name}` : "an object"}`,
     async run(input, context) {
       assertInScope(context, input.connectionId)
+      const source = await services.connections.get(context.workspaceId, input.connectionId)
+      if (!source) throw new ToolError(GONE)
       const objectId =
         input.objectId ??
         (await services.manifests.findObjectId(
@@ -292,6 +313,12 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
         )
       }
       const { object } = detail
+      // Metadata of schemas the source no longer reads stays stored but is not offered.
+      if (!source.schemas.includes(object.schema)) {
+        throw new ToolError(
+          `${object.schema}.${object.name} is in ${source.engine === "mongodb" ? "database" : "schema"} ${object.schema}, which this source no longer reads (it reads ${source.schemas.join(", ")}). Use the objects in your instructions.`,
+        )
+      }
       const columns = detail.columns
         .filter((column) => column.present)
         .map((column) => ({
@@ -457,6 +484,70 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
     },
   })
 
+  const readAttachment = tool({
+    name: "read_attachment",
+    description: `Read a file the user attached in this conversation (text, CSV, TSV, Markdown, or JSON), ${FILE_SLICE.default.toLocaleString("en-US")} bytes at a time by default. Continue from nextOffset to read more. The files are listed with the question.`,
+    input: z.object({
+      fileId: z.uuid().describe("The id of an attached file"),
+      offset: z.number().int().min(0).optional().describe("Byte to start from; 0 by default"),
+      maxBytes: z
+        .number()
+        .int()
+        .min(FILE_SLICE.min)
+        .max(FILE_SLICE.max)
+        .optional()
+        .describe(`Bytes to read; ${FILE_SLICE.default} by default`),
+    }),
+    describe: (input) => `Reading an attached file${input.offset ? ` from byte ${input.offset}` : ""}`,
+    async run(input, context) {
+      const attached = context.attachments.find((file) => file.id === input.fileId)
+      const file = attached ? await services.runs.readAttachment(context.workspaceId, attached.id) : null
+      if (!file) {
+        throw new ToolError(
+          "No file with this id was attached in this conversation. Use the file ids listed with the question.",
+        )
+      }
+      const slice = textSlice(file.content, input.offset ?? 0, input.maxBytes ?? FILE_SLICE.default)
+      return {
+        output: {
+          fileId: file.id,
+          name: file.name,
+          mediaType: file.mediaType,
+          sizeBytes: file.sizeBytes,
+          offset: slice.offset,
+          content: slice.text,
+          nextOffset: slice.nextOffset,
+        },
+        summary: `${file.name}: ${plural(Buffer.byteLength(slice.text), "byte")}${slice.nextOffset === null ? "" : " (more to read)"}`,
+      }
+    },
+  })
+
+  const askUser = tool({
+    name: "ask_user",
+    description:
+      "Ask the user one short question when the request is ambiguous in a way that changes the answer and neither the data nor its documentation can settle it (for example, whether “top customers” means by revenue or by number of orders). Offer the likely answers as options. The run pauses until the user replies, and the reply comes back as this tool's result. Never ask for something you can look up.",
+    input: z
+      .object({
+        question: z.string().trim().min(1).max(AGENT_LIMITS.clarificationChars),
+        options: z
+          .array(z.string().trim().min(1).max(AGENT_LIMITS.optionChars))
+          .max(AGENT_LIMITS.clarificationOptions)
+          .default([])
+          .transform((options) => [...new Set(options)])
+          .describe("Suggested answers the user can pick"),
+        allowFreeText: z.boolean().default(true).describe("Whether the user may write another answer"),
+      })
+      .refine((input) => input.allowFreeText || input.options.length >= 2, {
+        message: "Give at least two options, or allow a free-text answer",
+      }),
+    describe: (input) => `Asking you: ${snippet(input.question, null, 120)}`,
+    async run(input, context) {
+      const answer = await context.askUser(input)
+      return { output: { answer }, summary: `You answered: ${snippet(answer, null, 120)}` }
+    },
+  })
+
   const submitAnswer = tool({
     name: "submit_answer",
     description:
@@ -515,5 +606,14 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
     },
   })
 
-  return [listSources, searchMetadata, describeObject, readKnowledge, runQuery, submitAnswer]
+  return [
+    listSources,
+    searchMetadata,
+    describeObject,
+    readKnowledge,
+    runQuery,
+    readAttachment,
+    askUser,
+    submitAnswer,
+  ]
 }

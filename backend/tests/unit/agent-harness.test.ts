@@ -50,7 +50,10 @@ function fakeTool(
   }
 }
 
-function setup(script: Script | ModelProvider, options: { maxSteps?: number; signal?: AbortSignal } = {}) {
+function setup(
+  script: Script | ModelProvider,
+  options: { maxSteps?: number; signal?: AbortSignal; reply?: string } = {},
+) {
   const events: { type: RunEventType; data: unknown }[] = []
   const log: string[] = []
   const messages: ModelMessage[] = [{ role: "user", text: "How many orders?" }]
@@ -68,6 +71,17 @@ function setup(script: Script | ModelProvider, options: { maxSteps?: number; sig
       },
       log,
     ),
+    fakeTool(
+      "ask_user",
+      z.object({ question: z.string() }),
+      (value, context) =>
+        context.askUser({
+          question: (value as { question: string }).question,
+          options: [],
+          allowFreeText: true,
+        }),
+      log,
+    ),
     fakeTool("submit_answer", z.object({ markdown: z.string() }), () => ANSWER, log),
   ]
   const provider = typeof script === "function" ? new ScriptedProvider("test", script) : script
@@ -78,7 +92,18 @@ function setup(script: Script | ModelProvider, options: { maxSteps?: number; sig
         system: "system",
         messages,
         tools,
-        context: { workspaceId: "w", userId: "u", scope: null, signal, executions: new Map() },
+        context: {
+          workspaceId: "w",
+          userId: "u",
+          scope: null,
+          signal,
+          executions: new Map(),
+          attachments: [],
+          askUser: async () => {
+            log.push("asked")
+            return options.reply ?? "By revenue"
+          },
+        },
         maxSteps: options.maxSteps ?? 12,
         signal,
         emit: (type, data) => events.push({ type, data }),
@@ -207,6 +232,65 @@ test("a turn runs a bounded number of calls, and submit_answer after the others"
     results.results.slice(-3).map((result) => result.content.startsWith("Error: Too many tool calls")),
     [true, true, true],
   )
+})
+
+test("ask_user runs after the other calls, one per turn, and holds back an answer submitted with it", async () => {
+  const ask = (question: string) => ({ name: "ask_user", input: { question } })
+  const { run, log, messages } = setup((view) => {
+    if (view.turn === 0) {
+      return {
+        calls: [
+          ask("Revenue or orders?"),
+          submit,
+          ask("And which month?"),
+          { name: "list_sources", input: {} },
+        ],
+      }
+    }
+    return { calls: [submit] }
+  })
+  assert.deepEqual(await run(), ANSWER)
+  assert.deepEqual(log.slice(0, 3), ["list_sources", "ask_user", "asked"])
+  const first = messages[2]
+  assert.ok(first?.role === "tool")
+  assert.deepEqual(JSON.parse(first.results[0]?.content ?? ""), "By revenue")
+  assert.match(first.results[1]?.content ?? "", /^Error: Read the user's answer before submitting/)
+  assert.match(first.results[2]?.content ?? "", /^Error: Ask one question at a time/)
+  assert.equal(first.results[3]?.isError, false)
+})
+
+test("streamed text is recorded once enough has gathered, or after a short pause", async () => {
+  const provider: ModelProvider = {
+    provider: "test",
+    model: "test",
+    async turn(request) {
+      if (request.messages.length > 1) {
+        return {
+          text: "",
+          toolCalls: [{ id: "s", ...submit }],
+          stopReason: "tool_use",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+      }
+      request.onText("a".repeat(150))
+      request.onText("b".repeat(100))
+      request.onText("Thinking")
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      request.onText(" more")
+      return {
+        text: "",
+        toolCalls: [{ id: "l", name: "list_sources", input: {} }],
+        stopReason: "tool_use",
+        usage: { inputTokens: 0, outputTokens: 0 },
+      }
+    },
+  }
+  const { run, events } = setup(provider)
+  await run()
+  const deltas = events.flatMap((event) =>
+    event.type === "answer.delta" ? [(event.data as { text: string }).text] : [],
+  )
+  assert.deepEqual(deltas, [`${"a".repeat(150)}${"b".repeat(100)}`, "Thinking", " more"])
 })
 
 test("aborting stops the run with the abort reason", async () => {

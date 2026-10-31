@@ -15,7 +15,7 @@ test("agent configuration defaults, and a provider only when one is usable", () 
   const env = loadEnv({})
   assert.equal(env.AGENT_PROVIDER, "anthropic")
   assert.equal(env.AGENT_MODEL, "claude-opus-5-5")
-  assert.deepEqual(agentLimits(env), { maxSteps: 12, runTimeoutMs: 300_000 })
+  assert.deepEqual(agentLimits(env), { maxSteps: 12, runTimeoutMs: 300_000, answerTimeoutMs: 1_800_000 })
   assert.equal(createModelProvider(env), null, "no key, no provider")
 
   const keyed = createModelProvider(
@@ -28,11 +28,14 @@ test("agent configuration defaults, and a provider only when one is usable", () 
   assert.equal(demo?.provider, "scripted")
   assert.equal(demo?.model, DEMO_MODEL)
 
-  assert.deepEqual(agentLimits(loadEnv({ AGENT_MAX_STEPS: "3", AGENT_RUN_TIMEOUT_MS: "5000" })), {
-    maxSteps: 3,
-    runTimeoutMs: 5_000,
-  })
+  assert.deepEqual(
+    agentLimits(
+      loadEnv({ AGENT_MAX_STEPS: "3", AGENT_RUN_TIMEOUT_MS: "5000", AGENT_ANSWER_TIMEOUT_MS: "60000" }),
+    ),
+    { maxSteps: 3, runTimeoutMs: 5_000, answerTimeoutMs: 60_000 },
+  )
   assert.throws(() => loadEnv({ AGENT_MAX_STEPS: "0" }), /AGENT_MAX_STEPS/)
+  assert.throws(() => loadEnv({ AGENT_ANSWER_TIMEOUT_MS: "10" }), /AGENT_ANSWER_TIMEOUT_MS/)
   assert.throws(() => loadEnv({ AGENT_PROVIDER: "openai" }), /AGENT_PROVIDER/)
 })
 

@@ -6,7 +6,7 @@ import type { Pool } from "pg"
 import { agentLimits, createModelProvider } from "../agent/config.js"
 import type { ModelProvider } from "../agent/provider.js"
 import { AgentRunsRepository } from "../agent/repository.js"
-import { agentRouter, type AgentDeps } from "../agent/routes.js"
+import { agentRouter, START_RUN_PATH, type AgentDeps } from "../agent/routes.js"
 import { AgentRunner } from "../agent/runner.js"
 import { AgentService } from "../agent/service.js"
 import { createAgentTools } from "../agent/tools.js"
@@ -66,6 +66,8 @@ export interface AppDeps {
   agents?: AgentRunner
   /** Replaces the provider configured by AGENT_PROVIDER (null: none, so agent routes answer 503). */
   modelProvider?: ModelProvider | null
+  /** Heartbeat interval of agent event streams (15 s by default); shorter in tests. */
+  streamHeartbeatMs?: number
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
@@ -151,13 +153,15 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
     queriesDeps = { workspaces, auth, sessionSecret, executor }
     // Questions read metadata from storage; queries need the key, and tools say so without it.
     const provider = deps.modelProvider !== undefined ? deps.modelProvider : createModelProvider(env)
+    const runs = new AgentRunsRepository(pool)
     agentDeps = {
       workspaces,
       auth,
       sessionSecret,
+      ...(deps.streamHeartbeatMs !== undefined ? { heartbeatMs: deps.streamHeartbeatMs } : {}),
       agent: provider
         ? new AgentService({
-            runs: new AgentRunsRepository(pool),
+            runs,
             connections: connectionsRepository,
             manifests: manifestsRepository,
             knowledge,
@@ -169,6 +173,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
               search,
               executor,
               executions,
+              runs,
             }),
             provider,
             runner: deps.agents ?? new AgentRunner(),
@@ -181,7 +186,11 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.disable("x-powered-by")
   app.use(requestId)
   app.use(cors(env))
-  app.use(express.json({ limit: "1mb" }))
+  const json = express.json({ limit: "1mb" })
+  // Starting a question parses its own, larger body (it may carry files).
+  app.use((req, res, next) =>
+    req.method === "POST" && START_RUN_PATH.test(req.path) ? next() : json(req, res, next),
+  )
 
   const health = (_req: Request, res: Response) => {
     const result: HealthResult = {

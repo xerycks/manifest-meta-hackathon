@@ -3,7 +3,7 @@ import test from "node:test"
 
 import Anthropic from "@anthropic-ai/sdk"
 
-import { AnthropicProvider, echoableContent } from "../../src/agent/anthropic.js"
+import { AnthropicProvider, echoableContent, turnUsage } from "../../src/agent/anthropic.js"
 import { ModelProviderError, UnparseableToolInput, type ModelMessage } from "../../src/agent/provider.js"
 
 const API_KEY = "sk-ant-test-not-a-real-key"
@@ -229,6 +229,62 @@ test("models without server-side fallbacks are asked without them; stop reasons 
     assert.ok(!("fallbacks" in (requests[0]?.body ?? {})))
     assert.equal(requests[0]?.headers.get("anthropic-beta"), null)
   }
+})
+
+test("token usage sums every attempt when a server-side fallback ran", async () => {
+  const attempt = (type: string, model: string, input: number, output: number) => ({
+    type,
+    model,
+    input_tokens: input,
+    output_tokens: output,
+    cache_creation_input_tokens: 10,
+    cache_read_input_tokens: 0,
+    cache_creation: null,
+  })
+  const { client } = stubbedClient(() =>
+    streamed([
+      start({
+        input_tokens: 80,
+        output_tokens: 1,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      }),
+      { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+      { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Done." } },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          output_tokens: 30,
+          // The declined attempt is billed too; top-level usage covers only the attempt that answered.
+          iterations: [
+            attempt("message", "claude-opus-5-5", 100, 12),
+            attempt("fallback_message", "claude-opus-5", 80, 30),
+          ],
+        },
+      },
+      { type: "message_stop" },
+    ]),
+  )
+  const turn = await new AnthropicProvider("claude-opus-5-5", client).turn({
+    system: "s",
+    messages: [{ role: "user", text: "q" }],
+    tools: [],
+    signal: new AbortController().signal,
+    onText: () => {},
+  })
+  assert.deepEqual(turn.usage, { inputTokens: 200, outputTokens: 42 })
+  assert.deepEqual(
+    turnUsage({
+      input_tokens: 5,
+      output_tokens: 7,
+      cache_creation_input_tokens: null,
+      cache_read_input_tokens: 3,
+      iterations: null,
+    } as Anthropic.Beta.BetaUsage),
+    { inputTokens: 8, outputTokens: 7 },
+  )
 })
 
 test("API failures become safe provider errors that never echo the key", async () => {

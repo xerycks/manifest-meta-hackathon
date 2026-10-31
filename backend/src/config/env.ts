@@ -58,6 +58,9 @@ const envSchema = z
     ANTHROPIC_API_KEY: z.string().min(1).optional(),
     AGENT_MAX_STEPS: z.coerce.number().int().min(1).max(50).default(12),
     AGENT_RUN_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(1_800_000).default(300_000),
+    // How long a question waits for the user's reply to a clarification (the
+    // run's own time limit is paused meanwhile).
+    AGENT_ANSWER_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(86_400_000).default(1_800_000),
   })
   .superRefine((env, ctx) => {
     if (Boolean(env.GOOGLE_CLIENT_ID) !== Boolean(env.GOOGLE_CLIENT_SECRET)) {

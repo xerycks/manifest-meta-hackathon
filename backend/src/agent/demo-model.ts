@@ -8,20 +8,29 @@ const SIGNATURE =
   "_Answered by the scripted demo model (synthetic) with a fixed query; every number comes from the query result cited below._"
 
 const UNSUPPORTED = [
-  "I'm the scripted demo model (synthetic), not a language model, so I only answer a few fixed questions about the synthetic demo store: **net revenue by month**, **top products**, **refund rate**, and **open support tickets**.",
+  "I'm the scripted demo model (synthetic), not a language model, so I only answer a few fixed questions about the synthetic demo store: **net revenue by month**, **top products**, **top customers**, **refund rate**, and **open support tickets**.",
   "Set `ANTHROPIC_API_KEY` to ask anything else.",
 ].join("\n\n")
 
-interface Scenario {
-  matches: RegExp
-  schema: "shop" | "support"
-  /** Described before querying, as the instructions ask. */
-  object: string
+interface DemoQuery {
   purpose: string
   label: string
   sql: string
   /** Markdown built only from the query's rows. */
   answer(rows: Cell[][]): string
+}
+
+interface Scenario extends DemoQuery {
+  matches: RegExp
+  schema: "shop" | "support"
+  /** Described before querying, as the instructions ask. */
+  object: string
+  /**
+   * For an ambiguous question: what to ask the user, and the query an answer
+   * (or the question itself) settles on; null when it settles nothing, and
+   * then the scenario's own query is used.
+   */
+  clarify?: { question: string; options: string[]; choose(text: string): DemoQuery | null }
 }
 
 const text = (cell: Cell | undefined) =>
@@ -53,7 +62,55 @@ function largest(rows: Cell[][], column: number): Cell[] | undefined {
   )
 }
 
+function customersBy(measure: "revenue" | "orders"): DemoQuery {
+  const byRevenue = measure === "revenue"
+  return {
+    purpose: `Customers with the most ${byRevenue ? "revenue" : "orders"}`,
+    label: `Top customers by ${byRevenue ? "revenue" : "number of orders"}`,
+    sql: `SELECT c.full_name, c.segment, count(*) AS orders, sum(o.total) AS revenue
+  FROM shop.customers c
+  JOIN shop.orders o ON o.customer_id = c.id
+ WHERE o.status NOT IN ('cancelled', 'refunded')
+ GROUP BY c.id, c.full_name, c.segment
+ ORDER BY ${byRevenue ? "revenue DESC, orders DESC" : "orders DESC, revenue DESC"}
+ LIMIT 5`,
+    answer(rows) {
+      const top = rows[0]
+      return [
+        `**Top customers by ${byRevenue ? "revenue" : "number of orders"}** (orders that were not cancelled or refunded)`,
+        table(
+          ["#", "Customer", "Segment", "Orders", "Revenue (USD)"],
+          [true, false, false, true, true],
+          rows.map((row, index) => [
+            String(index + 1),
+            text(row[0]),
+            text(row[1]),
+            amount(row[2]),
+            amount(row[3]),
+          ]),
+        ),
+        `**${text(top?.[0])}** ranks first with ${amount(top?.[2])} orders and ${amount(top?.[3])} USD.`,
+      ].join("\n\n")
+    },
+  }
+}
+
 const SCENARIOS: Scenario[] = [
+  {
+    matches: /(top|best|biggest|largest|most valuable).*customers?|customers?.*(top|best|most)/i,
+    schema: "shop",
+    object: "customers",
+    ...customersBy("revenue"),
+    clarify: {
+      question: "Should “top customers” be ranked by revenue or by number of orders?",
+      options: ["By revenue", "By number of orders"],
+      choose(text) {
+        if (/order|purchase|count|number|often|frequen/i.test(text)) return customersBy("orders")
+        if (/revenue|spend|spent|sales|value|money|usd/i.test(text)) return customersBy("revenue")
+        return null
+      },
+    },
+  },
   {
     matches: /(top|best|most popular).*products?|products?.*(top|best|sell)/i,
     schema: "shop",
@@ -221,6 +278,28 @@ export function demoScript(view: ScriptView): ScriptedTurn {
       [`A PostgreSQL source with the synthetic ${scenario.schema} schema`],
     )
   }
+  let query: DemoQuery = scenario
+  if (scenario.clarify) {
+    const asked = view.last("ask_user")
+    const settled = scenario.clarify.choose(view.question)
+    if (!settled && !asked) {
+      return {
+        text: "This question can be read more than one way. ",
+        calls: [
+          {
+            name: "ask_user",
+            input: {
+              question: scenario.clarify.question,
+              options: scenario.clarify.options,
+              allowFreeText: true,
+            },
+          },
+        ],
+      }
+    }
+    const reply = asked?.ok ? String((asked.output as { answer?: unknown }).answer ?? "") : ""
+    query = settled ?? scenario.clarify.choose(reply) ?? scenario
+  }
   if (!view.last("describe_object")) {
     return {
       text: `Looking up what ${scenario.schema}.${scenario.object} means. `,
@@ -232,8 +311,8 @@ export function demoScript(view: ScriptView): ScriptedTurn {
       ],
     }
   }
-  const query = view.last("run_query")
-  if (!query) {
+  const ran = view.last("run_query")
+  if (!ran) {
     return {
       text: "Running the query. ",
       calls: [
@@ -241,16 +320,16 @@ export function demoScript(view: ScriptView): ScriptedTurn {
           name: "run_query",
           input: {
             connectionId: source.id,
-            query: { language: "sql", sql: scenario.sql },
-            purpose: scenario.purpose,
+            query: { language: "sql", sql: query.sql },
+            purpose: query.purpose,
           },
         },
       ],
     }
   }
-  if (!query.ok) {
+  if (!ran.ok) {
     return submit(
-      `The query for this question failed, so there is no answer: ${String(query.output)}`,
+      `The query for this question failed, so there is no answer: ${String(ran.output)}`,
       "partial",
       [],
       ["A successful query result"],
@@ -259,8 +338,8 @@ export function demoScript(view: ScriptView): ScriptedTurn {
   if (view.results.filter((result) => result.name === "submit_answer").length >= 2) {
     return { text: "The scripted demo could not submit its answer." }
   }
-  const result = query.output as QueryOutput
-  const evidence = [{ executionId: result.executionId, label: scenario.label }]
+  const result = ran.output as QueryOutput
+  const evidence = [{ executionId: result.executionId, label: query.label }]
   if (result.rows.length === 0) {
     return submit(
       `The query returned no rows, so there is nothing to report.\n\n${SIGNATURE}`,
@@ -269,7 +348,7 @@ export function demoScript(view: ScriptView): ScriptedTurn {
       ["Rows for the period asked about"],
     )
   }
-  return submit(`${scenario.answer(result.rows)}\n\n${SIGNATURE}`, "complete", evidence)
+  return submit(`${query.answer(result.rows)}\n\n${SIGNATURE}`, "complete", evidence)
 }
 
 export function createDemoModel(): ScriptedProvider {

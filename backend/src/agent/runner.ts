@@ -1,3 +1,5 @@
+import { RunEventBus } from "./event-bus.js"
+
 /** Why a run's signal was aborted from outside. */
 export type AgentStopReason = "cancelled" | "shutdown"
 
@@ -25,13 +27,20 @@ interface Active extends AgentJob {
   done: Promise<void> | null
 }
 
+/** Records the user's answer to a waiting run before the run goes on; must not throw. */
+export type RecordAnswer = (answer: string) => Promise<void>
+
 /**
  * Admits agent runs within per-conversation, per-user, per-workspace, and
- * per-process limits, tracks them so they can be cancelled by id, and aborts
- * them together on shutdown.
+ * per-process limits, tracks them so they can be cancelled or answered by id,
+ * hands their events to the streams following them, and aborts them together
+ * on shutdown. A run waiting for the user's answer keeps its place.
  */
 export class AgentRunner {
+  /** Recorded events of the runs in this process, for live streams. */
+  readonly events = new RunEventBus()
   private readonly active = new Map<string, Active>()
+  private readonly waiting = new Map<string, (answer: string) => Promise<void>>()
   private stopped = false
 
   constructor(private readonly limits: typeof AGENT_CONCURRENCY = AGENT_CONCURRENCY) {}
@@ -69,6 +78,39 @@ export class AgentRunner {
     if (!active) return false
     active.controller.abort("cancelled" satisfies AgentStopReason)
     await active.done
+    return true
+  }
+
+  /**
+   * Waits for the user's answer to the run's clarification. When it arrives,
+   * `record` runs before the answer reaches the run (and before answer()
+   * returns). Rejects with the abort reason if the run stops first.
+   */
+  waitForAnswer(runId: string, signal: AbortSignal, record: RecordAnswer): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const stop = () => {
+        this.waiting.delete(runId)
+        reject(signal.reason)
+      }
+      if (signal.aborted) {
+        stop()
+        return
+      }
+      signal.addEventListener("abort", stop, { once: true })
+      this.waiting.set(runId, async (answer) => {
+        signal.removeEventListener("abort", stop)
+        await record(answer)
+        resolve(answer)
+      })
+    })
+  }
+
+  /** Gives a waiting run its answer once recorded; false when no run here is waiting for one. */
+  async answer(runId: string, answer: string): Promise<boolean> {
+    const deliver = this.waiting.get(runId)
+    if (!deliver) return false
+    this.waiting.delete(runId)
+    await deliver(answer)
     return true
   }
 
