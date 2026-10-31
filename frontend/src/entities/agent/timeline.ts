@@ -1,6 +1,8 @@
 // Builds what the ask screen shows from a run and its ordered events. Events
 // are applied once each, in sequence order, so replays and duplicate
-// deliveries after a reconnect change nothing.
+// deliveries after a reconnect change nothing. A finished run shows its
+// answer (or how it ended) without the text streamed while working, exactly
+// as the server returns it when the conversation is read again.
 
 import {
   ACTIVE_RUN_STATUSES,
@@ -9,6 +11,7 @@ import {
   type AgentRunWithEvents,
   type Clarification,
   type ConversationWithRuns,
+  type RecoveryDisposition,
   type RunError,
   type RunEvent,
   type RunStatus,
@@ -51,9 +54,14 @@ export interface RunTimeline {
   items: TimelineItem[]
   answer: AgentAnswer | null
   error: RunError | null
+  /** How an interrupted run is recovered, from its run.interrupted event or a read of the run. */
+  disposition: RecoveryDisposition | null
 }
 
 export const isActive = (status: RunStatus) => ACTIVE_RUN_STATUSES.includes(status)
+
+/** The answer or error of a finished run supersedes the text streamed while working. */
+const settled = (items: TimelineItem[]) => items.filter((item) => item.kind !== "note")
 
 function applyEvent(timeline: RunTimeline, event: RunEvent): RunTimeline {
   const items = timeline.items
@@ -128,11 +136,19 @@ function applyEvent(timeline: RunTimeline, event: RunEvent): RunTimeline {
         ),
       }
     case "answer.completed":
-      return { ...timeline, status: status("completed"), answer: event.data.answer }
+      return { ...timeline, status: status("completed"), answer: event.data.answer, items: settled(items) }
     case "run.failed":
-      return { ...timeline, status: status("failed"), error: event.data }
+      return { ...timeline, status: status("failed"), error: event.data, items: settled(items) }
     case "run.cancelled":
-      return { ...timeline, status: status("cancelled") }
+      return { ...timeline, status: status("cancelled"), items: settled(items) }
+    case "run.interrupted":
+      return {
+        ...timeline,
+        status: status("interrupted"),
+        error: { code: event.data.code, message: event.data.message },
+        disposition: event.data.disposition,
+        items: settled(items),
+      }
   }
 }
 
@@ -157,6 +173,7 @@ export function timelineFromRun(run: AgentRun | AgentRunWithEvents): RunTimeline
     items: [],
     answer: null,
     error: null,
+    disposition: null,
   }
   return withSnapshot(applyEvents(start, events), rest)
 }
@@ -172,8 +189,10 @@ function withSnapshot(timeline: RunTimeline, run: AgentRun): RunTimeline {
       ...timeline,
       run,
       status: isActive(timeline.status) ? run.status : timeline.status,
+      items: settled(timeline.items),
       answer: timeline.answer ?? run.answer,
       error: timeline.error ?? run.error,
+      disposition: timeline.disposition ?? run.disposition,
     }
   }
   const fromRun = timeline.lastSeq === 0 && isActive(timeline.status)
@@ -196,20 +215,33 @@ export interface ChatState {
   conversationId: string | null
   /** Oldest first. */
   runs: RunTimeline[]
+  /** The server has older runs than the oldest shown. */
+  hasEarlier: boolean
 }
 
 export type ChatAction =
   /** Another conversation (or a new one) is opened. */
   | { type: "open"; conversationId: string | null }
-  /** The conversation as read from the server. */
+  /** The conversation as read from the server: its latest runs, or older ones. */
   | { type: "loaded"; conversation: ConversationWithRuns }
-  /** A question was accepted; its conversation is the current one from now on. */
-  | { type: "started"; run: AgentRun }
+  /**
+   * A question was accepted. `from` is the conversation it was asked in
+   * (null: a new one); if another conversation was opened meanwhile, the run
+   * stays out of it.
+   */
+  | { type: "started"; run: AgentRun; from: string | null }
   | { type: "events"; runId: string; events: RunEvent[] }
   /** A fresher read of one run, e.g. after cancelling or answering it. */
   | { type: "run"; run: AgentRunWithEvents }
 
-export const emptyChat = (conversationId: string | null): ChatState => ({ conversationId, runs: [] })
+export const emptyChat = (conversationId: string | null): ChatState => ({
+  conversationId,
+  runs: [],
+  hasEarlier: false,
+})
+
+const byCreation = (a: RunTimeline, b: RunTimeline) =>
+  a.run.createdAt.localeCompare(b.run.createdAt) || a.run.id.localeCompare(b.run.id)
 
 function mergeRun(runs: RunTimeline[], run: AgentRun | AgentRunWithEvents): RunTimeline[] {
   const index = runs.findIndex((timeline) => timeline.run.id === run.id)
@@ -223,12 +255,17 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "open":
       return action.conversationId === state.conversationId ? state : emptyChat(action.conversationId)
     case "loaded": {
-      if (action.conversation.id !== state.conversationId) return state
-      const runs = action.conversation.runs.reduce(mergeRun, state.runs)
-      return { ...state, runs: [...runs].sort((a, b) => a.run.createdAt.localeCompare(b.run.createdAt)) }
+      const { conversation } = action
+      if (conversation.id !== state.conversationId) return state
+      const runs = [...conversation.runs.reduce(mergeRun, state.runs)].sort(byCreation)
+      // Only the read that reaches furthest back knows whether older runs exist.
+      const oldest = conversation.runs[0]
+      const reachesBack = !oldest || runs[0]?.run.id === oldest.id
+      return { ...state, runs, hasEarlier: reachesBack ? conversation.hasEarlier : state.hasEarlier }
     }
     case "started":
-      return { conversationId: action.run.conversationId, runs: mergeRun(state.runs, action.run) }
+      if (action.from !== state.conversationId) return state
+      return { ...state, conversationId: action.run.conversationId, runs: mergeRun(state.runs, action.run) }
     case "events":
       return {
         ...state,
@@ -237,8 +274,14 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ),
       }
     case "run":
+      if (action.run.conversationId !== state.conversationId) return state
       return { ...state, runs: mergeRun(state.runs, action.run) }
   }
+}
+
+/** Whether a run of the conversation was retried (it has a retry among the runs shown). */
+export function wasRetried(state: ChatState, runId: string): boolean {
+  return state.runs.some((timeline) => timeline.run.retryOf === runId)
 }
 
 /** The run still being answered, if any (a conversation has at most one). */

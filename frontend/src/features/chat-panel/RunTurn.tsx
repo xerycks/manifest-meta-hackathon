@@ -1,4 +1,4 @@
-import { Check, ChevronDown, CircleAlert, FileText, LoaderCircle, RotateCcw } from "lucide-react"
+import { Check, ChevronDown, CircleAlert, FileText, LoaderCircle, RefreshCw, RotateCcw } from "lucide-react"
 import { useId, useState } from "react"
 
 import { formatBytes } from "@/entities/agent/attachments.ts"
@@ -111,15 +111,21 @@ export function RunTurn({
   onAnswer,
   answering,
   onRetry,
+  retried,
+  retrying,
 }: {
   timeline: RunTimeline
   sourceNames: Map<string, string>
   onAnswer: (runId: string, answer: string) => Promise<void>
   answering: boolean
+  /** Asks a failed question again, or retries an interrupted one. */
   onRetry: (timeline: RunTimeline) => void
+  /** An interrupted run was already retried (the retry follows it). */
+  retried: boolean
+  retrying: boolean
 }) {
   const id = useId()
-  const { run, status, answer, error } = timeline
+  const { run, status, answer, error, disposition } = timeline
   const active = isActive(status)
   const pending = pendingClarification(timeline)
   const scope =
@@ -223,6 +229,32 @@ export function RunTurn({
           </FailureNotice>
         )}
         {status === "cancelled" && <p className="text-sm text-(--muted)">Stopped before it was answered.</p>}
+        {status === "interrupted" && (
+          <div
+            role="status"
+            className="rounded-md border border-(--warning-border) bg-(--warning-surface) px-3 py-2 text-sm text-(--warning)"
+          >
+            <p className="font-medium">Interrupted by a restart</p>
+            <p className="mt-0.5 leading-6">
+              {disposition === "reconcile"
+                ? "It had started actions with effects before the backend restarted. Check what they changed before asking again."
+                : retried
+                  ? "The backend restarted before it was answered. It was asked again below."
+                  : "The backend restarted before it was answered. It only read data, so it is safe to retry with the same sources and files."}
+            </p>
+            {disposition === "retry" && !retried && (
+              <Button
+                variant="secondary"
+                className="mt-2"
+                disabled={retrying}
+                onClick={() => onRetry(timeline)}
+              >
+                <RefreshCw aria-hidden className="size-4" />
+                Retry
+              </Button>
+            )}
+          </div>
+        )}
 
         <p className="flex flex-wrap items-center gap-2 text-xs text-(--muted)">
           {status === "completed" ? "Answered by" : "Model:"} {modelLabel(run)}

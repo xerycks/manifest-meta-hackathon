@@ -1,16 +1,26 @@
-import { SquarePen } from "lucide-react"
+import { List, SquarePen } from "lucide-react"
+import { useState } from "react"
 import { Link, useNavigate, useParams } from "react-router-dom"
 
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { ChatPanel } from "@/features/chat-panel/ChatPanel.tsx"
-import { buttonVariants } from "@/shared/ui/button.tsx"
+import { ConversationList } from "@/features/conversation-list/ConversationList.tsx"
+import { cn } from "@/shared/lib/cn.ts"
+import { Button, buttonVariants } from "@/shared/ui/button.tsx"
 import { LoadingState } from "@/shared/ui/states.tsx"
 
-/** Ask questions of the workspace's data; /ask starts a conversation, /ask/:conversationId continues one. */
+const LIST_ID = "ask-conversations"
+
+/**
+ * Ask questions of the workspace's data; /ask starts a conversation,
+ * /ask/:conversationId continues one. The conversation list is a sidebar on
+ * wide screens and opens on request on narrow ones.
+ */
 export function AskPage() {
   const { conversationId = null } = useParams()
   const session = useWorkspaceSession()
   const navigate = useNavigate()
+  const [listOpen, setListOpen] = useState(false)
 
   return (
     <div className="space-y-6">
@@ -21,21 +31,55 @@ export function AskPage() {
             Every answer shows the queries that produced it, so you can check the numbers.
           </p>
         </div>
-        {conversationId && (
-          <Link to="/ask" className={buttonVariants({ variant: "secondary" })}>
-            <SquarePen aria-hidden className="size-4" />
-            New conversation
-          </Link>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            className="lg:hidden"
+            aria-expanded={listOpen}
+            aria-controls={LIST_ID}
+            onClick={() => setListOpen((open) => !open)}
+          >
+            <List aria-hidden className="size-4" />
+            Conversations
+          </Button>
+          {conversationId && (
+            <Link to="/ask" className={buttonVariants({ variant: "secondary" })}>
+              <SquarePen aria-hidden className="size-4" />
+              New conversation
+            </Link>
+          )}
+        </div>
       </div>
       {session.workspaceId ? (
-        <ChatPanel
-          // A different workspace is a different set of conversations.
-          key={session.workspaceId}
-          workspaceId={session.workspaceId}
-          conversationId={conversationId}
-          onConversationStarted={(id) => navigate(`/ask/${id}`, { replace: true })}
-        />
+        <div className="lg:grid lg:grid-cols-[15rem_minmax(0,1fr)] lg:items-start lg:gap-8">
+          <nav
+            id={LIST_ID}
+            aria-label="Conversations"
+            className={cn(
+              "mb-6 rounded-lg border border-(--border) p-2 lg:sticky lg:top-6 lg:mb-0 lg:block lg:max-h-[calc(100dvh-3rem)] lg:overflow-y-auto lg:border-0 lg:p-0",
+              !listOpen && "hidden",
+            )}
+          >
+            <ConversationList
+              // A different workspace is a different set of conversations.
+              key={session.workspaceId}
+              workspaceId={session.workspaceId}
+              currentId={conversationId}
+              onNavigate={() => setListOpen(false)}
+              onDeleted={(id) => {
+                if (id === conversationId) navigate("/ask", { replace: true })
+              }}
+            />
+          </nav>
+          <div className="min-w-0">
+            <ChatPanel
+              key={session.workspaceId}
+              workspaceId={session.workspaceId}
+              conversationId={conversationId}
+              onConversationStarted={(id) => navigate(`/ask/${id}`, { replace: true })}
+            />
+          </div>
+        </div>
       ) : (
         <LoadingState label="Loading workspace…" />
       )}

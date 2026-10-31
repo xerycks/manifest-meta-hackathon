@@ -6,7 +6,7 @@ import { Button } from "@/shared/ui/button.tsx"
 import { FailureNotice } from "@/shared/ui/failure-notice.tsx"
 import { Textarea } from "@/shared/ui/fields.tsx"
 
-import { describeAskError } from "./chat-text.ts"
+import { describeAskError, waitsUntil } from "./chat-text.ts"
 
 /** A question the model asked: pick an option or write an answer; the run goes on once it is sent. */
 export function ClarificationCard({
@@ -45,6 +45,9 @@ export function ClarificationCard({
           <p className="text-xs font-medium tracking-wide text-(--muted) uppercase">Needs your answer</p>
           <p id={`${id}-question`} className="mt-0.5 text-sm font-medium break-words">
             {clarification.question}
+          </p>
+          <p className="mt-1 text-xs text-(--muted)">
+            Waits for your answer until {waitsUntil(clarification.expiresAt)}, also if you leave this page.
           </p>
         </div>
       </div>

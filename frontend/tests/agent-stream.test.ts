@@ -31,6 +31,8 @@ function run(status: RunStatus, events: RunEvent[]): AgentRunWithEvents {
     steps: 0,
     clarification: null,
     attachments: [],
+    disposition: null,
+    retryOf: null,
     createdAt: AT,
     startedAt: AT,
     finishedAt: null,

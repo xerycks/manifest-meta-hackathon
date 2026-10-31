@@ -9,6 +9,7 @@ export const AGENT_LIMITS = {
   answerChars: 8_000,
   evidenceRows: 20,
   answerReplyChars: 2_000,
+  titleChars: 120,
 } as const
 
 /** Files a question may carry: a few small UTF-8 text files the model reads. */
@@ -29,8 +30,9 @@ export const ATTACHMENT_TYPES = {
 
 export type AttachmentMediaType = (typeof ATTACHMENT_TYPES)[keyof typeof ATTACHMENT_TYPES]
 
-/** Cycle 12 adds interrupted. */
-export type RunStatus = "queued" | "running" | "awaiting_input" | "completed" | "failed" | "cancelled"
+/** interrupted: a restart stopped the run; its disposition says how to recover it. */
+export type RunStatus =
+  "queued" | "running" | "awaiting_input" | "completed" | "failed" | "cancelled" | "interrupted"
 
 export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "awaiting_input"]
 
@@ -43,6 +45,13 @@ export type AgentToolName =
   | "read_attachment"
   | "ask_user"
   | "submit_answer"
+
+/**
+ * How an interrupted run is recovered. retry: it only read, so it can be
+ * asked again (POST …/runs/:runId/retry). reconcile: it started a tool with
+ * effects, whose outcome must be checked before anything is repeated.
+ */
+export type RecoveryDisposition = "retry" | "reconcile"
 
 /** A query result an answer cites, with the first rows of its result. */
 export interface EvidenceItem {
@@ -83,6 +92,8 @@ export interface Clarification {
   options: string[]
   /** False: the answer must be one of the options. */
   allowFreeText: boolean
+  /** When the run stops waiting for the answer. */
+  expiresAt: string
 }
 
 /** A file sent with a question, without its content. */
@@ -117,6 +128,10 @@ export interface AgentRun {
   /** What the run is waiting on while awaiting_input; null otherwise. */
   clarification: Clarification | null
   attachments: AttachmentSummary[]
+  /** Set when interrupted: how to recover the run. */
+  disposition: RecoveryDisposition | null
+  /** The interrupted run this one retries. */
+  retryOf: string | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -135,6 +150,8 @@ export interface RunEventData {
   "clarification.answered": { id: string; answer: string }
   "run.failed": RunError
   "run.cancelled": Record<string, never>
+  /** A restart stopped the run (status interrupted). */
+  "run.interrupted": RunError & { disposition: RecoveryDisposition }
 }
 
 export type RunEventType = keyof RunEventData
@@ -145,19 +162,47 @@ export type RunEvent = {
 }[RunEventType]
 
 /** Events after which a run's stream ends. */
-export const TERMINAL_EVENT_TYPES: readonly RunEventType[] = ["answer.completed", "run.failed", "run.cancelled"]
+export const TERMINAL_EVENT_TYPES: readonly RunEventType[] = [
+  "answer.completed",
+  "run.failed",
+  "run.cancelled",
+  "run.interrupted",
+]
 
 export interface AgentRunWithEvents extends AgentRun {
   events: RunEvent[]
 }
 
-/** GET …/agent/conversations/:conversationId: the latest runs, oldest first; finished runs leave out answer.delta. */
-export interface ConversationWithRuns {
+export interface Conversation {
   id: string
   title: string
   createdAt: string
+  /** When the latest question was asked. */
   updatedAt: string
+}
+
+/** A conversation in the list, with how its latest question stands. */
+export interface ConversationSummary extends Conversation {
+  /** Null for a conversation without questions. */
+  status: RunStatus | null
+  /** The latest question waits for the user's answer. */
+  pendingClarification: boolean
+}
+
+/** GET …/agent/conversations?limit=&cursor=: newest activity first. */
+export interface ConversationPage {
+  conversations: ConversationSummary[]
+  nextCursor: string | null
+}
+
+/**
+ * GET …/agent/conversations/:conversationId?before=: the latest runs (before
+ * that run), oldest first; finished runs leave out answer.delta.
+ */
+export interface ConversationWithRuns extends Conversation {
   runs: AgentRunWithEvents[]
+  /** Older runs exist: read them with ?before=<the first run's id>. */
+  hasEarlier: boolean
 }
 
 /** A file as sent with a question: its name and its bytes in base64. */
@@ -166,10 +211,12 @@ export interface AttachmentInput {
   content: string
 }
 
-/** POST /workspaces/:workspaceId/agent/runs → 202 AgentRun. */
+/** POST /workspaces/:workspaceId/agent/runs → 202 AgentRun (200 when mutationId was sent before). */
 export interface StartRunInput {
   question: string
   conversationId?: string
   connectionIds?: string[]
   attachments?: AttachmentInput[]
+  /** New for each question; sending it again returns the run it started. */
+  mutationId?: string
 }

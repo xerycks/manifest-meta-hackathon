@@ -2,7 +2,7 @@ import { WifiOff } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 
-import type { RunTimeline } from "@/entities/agent/timeline.ts"
+import { wasRetried, type RunTimeline } from "@/entities/agent/timeline.ts"
 import type { RunStatus } from "@/entities/agent/types.ts"
 import { useConnections } from "@/entities/connections/api.ts"
 import { ApiError } from "@/shared/api/client.ts"
@@ -90,9 +90,17 @@ export function ChatPanel({
     input.current?.focus()
   }
 
-  /** Asks a failed question again, with its files when this page still has them. */
+  /**
+   * Retries an interrupted question (the server keeps its sources and files),
+   * or asks a failed one again, with its files when this page still has them.
+   */
   function retry(timeline: RunTimeline) {
     const { run } = timeline
+    if (timeline.status === "interrupted") {
+      setNotice(null)
+      chat.recover(run.id).catch((error: unknown) => setNotice(describeAskError(error, "retry the question")))
+      return
+    }
     const files = chat.filesOf(run.id)
     if (run.attachments.length > 0 && !files) {
       setDraft({ question: run.question, connectionIds: run.connectionIds, files: [] })
@@ -109,6 +117,11 @@ export function ChatPanel({
   async function reply(runId: string, answer: string) {
     await chat.reply(runId, answer)
     input.current?.focus()
+  }
+
+  function loadEarlier() {
+    setNotice(null)
+    chat.loadEarlier().catch((error: unknown) => setNotice(describeAskError(error, "load earlier questions")))
   }
 
   const loadError = conversationId !== null && runs.length === 0 ? chat.snapshot.error : null
@@ -147,6 +160,14 @@ export function ChatPanel({
         />
       )}
 
+      {chat.state.hasEarlier && (
+        <div className="flex justify-center">
+          <Button variant="secondary" onClick={loadEarlier} disabled={chat.loadingEarlier}>
+            {chat.loadingEarlier ? "Loading earlier questions…" : "Show earlier questions"}
+          </Button>
+        </div>
+      )}
+
       {runs.length > 0 && (
         <div className="space-y-8">
           {runs.map((timeline) => (
@@ -157,6 +178,8 @@ export function ChatPanel({
               onAnswer={reply}
               answering={chat.replying}
               onRetry={retry}
+              retried={wasRetried(chat.state, timeline.run.id)}
+              retrying={chat.recovering}
             />
           ))}
         </div>

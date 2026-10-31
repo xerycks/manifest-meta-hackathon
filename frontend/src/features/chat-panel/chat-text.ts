@@ -59,6 +59,14 @@ function plainLine(markdown: string): string {
     .trim()
 }
 
+/** Until when a clarification waits: a time today, or a date and time. */
+export function waitsUntil(iso: string, now: number = Date.now()): string {
+  const at = new Date(iso)
+  const time = at.toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" })
+  if (at.toDateString() === new Date(now).toDateString()) return time
+  return `${at.toLocaleDateString("en", { month: "short", day: "numeric" })}, ${time}`
+}
+
 /** A short line for screen readers when a run reaches a new state. */
 export function announcement(status: RunStatus, answer: string | null): string | null {
   switch (status) {
@@ -70,6 +78,8 @@ export function announcement(status: RunStatus, answer: string | null): string |
       return "The question could not be answered."
     case "cancelled":
       return "The question was stopped."
+    case "interrupted":
+      return "A restart interrupted the question."
     default:
       return null
   }

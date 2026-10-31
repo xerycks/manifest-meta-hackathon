@@ -12,6 +12,7 @@ import {
 import type { AgentAnswer, AgentRun, AgentRunWithEvents, RunEvent } from "../src/entities/agent/types.ts"
 
 const AT = "2026-10-31T10:00:00.000Z"
+const LATER = "2026-10-31T10:30:00.000Z"
 
 function run(overrides: Partial<AgentRun> = {}): AgentRun {
   return {
@@ -29,6 +30,8 @@ function run(overrides: Partial<AgentRun> = {}): AgentRun {
     steps: 0,
     clarification: null,
     attachments: [],
+    disposition: null,
+    retryOf: null,
     createdAt: AT,
     startedAt: null,
     finishedAt: null,
@@ -110,17 +113,22 @@ test("events already applied are ignored by sequence, so replays after a reconne
   assert.equal(late, once, "an event at or below the last sequence is a no-op")
 })
 
-test("streamed text comes first, and the final answer is the structured one", () => {
-  const events = [
-    ...story(),
-    event("answer.delta", { text: "Done." }),
-    event("answer.completed", { answer: ANSWER }),
-  ]
-  const timeline = applyEvents(timelineFromRun(run()), events)
+test("streamed text shows while the run works; the final answer replaces it, so the answer shows once", () => {
+  const working = applyEvents(timelineFromRun(run()), [...story(), event("answer.delta", { text: "Done." })])
+  assert.deepEqual(working.items.at(-1), { kind: "note", text: "Done." })
+  const timeline = applyEvents(working, [event("answer.completed", { answer: ANSWER })])
   assert.equal(timeline.status, "completed")
   assert.deepEqual(timeline.answer, ANSWER)
-  assert.deepEqual(timeline.items.at(-1), { kind: "note", text: "Done." })
-  assert.equal(activeRun({ conversationId: "conversation-1", runs: [timeline] }), null)
+  assert.ok(
+    !timeline.items.some((item) => item.kind === "note"),
+    "no streamed text is left beside the answer",
+  )
+  assert.deepEqual(
+    timeline.items.map((item) => item.kind === "tool" && item.callId),
+    ["c1", "c2"],
+    "the steps stay",
+  )
+  assert.equal(activeRun({ conversationId: "conversation-1", runs: [timeline], hasEarlier: false }), null)
 })
 
 test("a clarification waits for an answer, then the run goes on", () => {
@@ -133,6 +141,7 @@ test("a clarification waits for an answer, then the run goes on", () => {
       question: "Revenue or orders?",
       options: ["By revenue", "By number of orders"],
       allowFreeText: true,
+      expiresAt: LATER,
     }),
   ])
   assert.equal(asked.status, "awaiting_input")
@@ -158,6 +167,7 @@ test("a clarification waits for an answer, then the run goes on", () => {
         question: "Revenue or orders?",
         options: ["By revenue", "By number of orders"],
         allowFreeText: true,
+        expiresAt: LATER,
       },
       answer: "By number of orders",
     },
@@ -186,7 +196,7 @@ test("cancelling and failing end the run, and a finished run stays finished", ()
 
 test("a finished read of the run settles it even when its last events never arrived", () => {
   const live = applyEvents(timelineFromRun(run()), story())
-  const state = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const state = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "events",
     runId: "run-1",
     events: story(),
@@ -198,15 +208,20 @@ test("a finished read of the run settles it even when its last events never arri
   })
   assert.equal(settled.runs[0]?.status, "completed")
   assert.deepEqual(settled.runs[0]?.answer, ANSWER)
-  assert.equal(settled.runs[0]?.items.length, live.items.length, "progress so far is kept")
+  assert.deepEqual(
+    settled.runs[0]?.items,
+    live.items.filter((item) => item.kind !== "note"),
+    "the steps so far are kept; the answer replaces the streamed text",
+  )
 })
 
 test("a conversation opens from its stored runs, merges with runs started here, and resets when another opens", () => {
   const opened = chatReducer(emptyChat(null), { type: "open", conversationId: "conversation-1" })
-  assert.deepEqual(opened, { conversationId: "conversation-1", runs: [] })
+  assert.deepEqual(opened, { conversationId: "conversation-1", runs: [], hasEarlier: false })
   const asked = chatReducer(opened, {
     type: "started",
     run: run({ id: "run-2", createdAt: "2026-10-31T10:05:00.000Z" }),
+    from: "conversation-1",
   })
   const loaded = chatReducer(asked, {
     type: "loaded",
@@ -222,6 +237,7 @@ test("a conversation opens from its stored runs, merges with runs started here, 
           events: story(),
         },
       ],
+      hasEarlier: false,
     },
   })
   assert.deepEqual(
@@ -247,13 +263,13 @@ test("a conversation opens from its stored runs, merges with runs started here, 
 
 test("after a reconnect, the caught-up read and the replayed stream add up to each event once", () => {
   const events = story()
-  const once = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const once = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "events",
     runId: "run-1",
     events,
   })
   // Events 1-3 arrived live, the read while reconnecting brought 4-7, then the new stream repeats 6-7.
-  let state = chatReducer(emptyChat(null), { type: "started", run: run() })
+  let state = chatReducer(emptyChat(null), { type: "started", run: run(), from: null })
   state = chatReducer(state, { type: "events", runId: "run-1", events: events.slice(0, 3) })
   state = chatReducer(state, {
     type: "run",
@@ -269,7 +285,7 @@ test("after a reconnect, the caught-up read and the replayed stream add up to ea
 
 test("an older read of the run never undoes what the stream has shown", () => {
   const events = [...story(), event("answer.completed", { answer: ANSWER })]
-  const done = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const done = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "events",
     runId: "run-1",
     events,
@@ -282,6 +298,7 @@ test("an older read of the run never undoes what the stream has shown", () => {
       createdAt: AT,
       updatedAt: AT,
       runs: [{ ...run({ status: "running" }), events: events.slice(0, 3) }],
+      hasEarlier: false,
     },
   })
   assert.equal(stale.runs[0]?.status, "completed")
@@ -290,7 +307,7 @@ test("an older read of the run never undoes what the stream has shown", () => {
   assert.equal(activeRun(stale), null)
 
   // Settled by a finished read without events, then an older read still says queued.
-  const settled = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const settled = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "run",
     run: { ...run({ status: "failed", error: { code: "AGENT_INTERRUPTED", message: "Stopped." } }), events: [] },
   })
@@ -304,9 +321,15 @@ test("cancelling while a clarification waits removes the question to answer and 
   const asked = [
     event("run.started", { provider: "scripted", model: "demo (synthetic)" }),
     event("tool.started", { callId: "c1", tool: "ask_user", summary: "Asking you: which month?" }),
-    event("clarification.requested", { id: "q1", question: "Which month?", options: [], allowFreeText: true }),
+    event("clarification.requested", {
+      id: "q1",
+      question: "Which month?",
+      options: [],
+      allowFreeText: true,
+      expiresAt: LATER,
+    }),
   ]
-  const waiting = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const waiting = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "events",
     runId: "run-1",
     events: asked,
@@ -338,10 +361,11 @@ test("an answer to a clarification shows at once from the response, and the stre
       question: "Revenue or orders?",
       options: ["By revenue", "By number of orders"],
       allowFreeText: false,
+      expiresAt: LATER,
     }),
   ]
   const answeredEvent = event("clarification.answered", { id: "q1", answer: "By revenue" })
-  const waiting = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run() }), {
+  const waiting = chatReducer(chatReducer(emptyChat(null), { type: "started", run: run(), from: null }), {
     type: "events",
     runId: "run-1",
     events: asked,
