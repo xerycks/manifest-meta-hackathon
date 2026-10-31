@@ -9,7 +9,8 @@ import type { ManifestsRepository } from "../manifests/repository.js"
 import type { ManifestRelationship } from "../manifests/schemas.js"
 import type { QueryExecutionsRepository } from "../queries/repository.js"
 import {
-  readQuerySchema,
+  mongoQuerySchema,
+  sqlQuerySchema,
   type Cell,
   type ExecutionRecord,
   type QueryResult,
@@ -42,6 +43,14 @@ const EVIDENCE_CHARS = 50_000
 const KNOWLEDGE_CHARS = 6_000
 /** Limits on queries the agent runs; tighter than the console's maximums. */
 const AGENT_QUERY_LIMITS = { maxRows: 1_000, timeoutMs: 30_000 } as const
+/**
+ * The read-query contract without positional parameter values: an answer's
+ * evidence shows, exports, and saves its query as written.
+ */
+const agentQuerySchema = z.discriminatedUnion("language", [
+  sqlQuerySchema.omit({ params: true }),
+  mongoQuerySchema,
+])
 const BUSY_RETRIES = 2
 const BUSY_WAIT_MS = 1_500
 const SEARCH_HITS = 10
@@ -428,7 +437,7 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
     ].join(" "),
     input: z.object({
       connectionId: z.uuid(),
-      query: readQuerySchema,
+      query: agentQuerySchema,
       purpose: z.string().trim().min(1).max(300).describe("What this query is for, in a few words"),
     }),
     describe: (input) => `Querying: ${snippet(input.purpose, null, 120)}`,

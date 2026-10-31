@@ -6,6 +6,7 @@ import { agentLimits, createModelProvider } from "../../src/agent/config.js"
 import { amount, DEMO_MODEL, demoScript } from "../../src/agent/demo-model.js"
 import { AgentRunner } from "../../src/agent/runner.js"
 import { scriptView } from "../../src/agent/scripted.js"
+import { createAgentTools, type ToolServices } from "../../src/agent/tools.js"
 import { loadEnv } from "../../src/config/env.js"
 import { jsonbText } from "../../src/shared/postgres/json.js"
 
@@ -123,4 +124,19 @@ test("the demo model formats exact amounts and admits what it cannot answer", ()
 
   const first = demoScript(scriptView([{ role: "user", text: "What was net revenue by month?" }]))
   assert.equal(first.calls?.[0]?.name, "list_sources")
+})
+
+test("run_query takes a query as written, without positional parameter values", () => {
+  const runQuery = createAgentTools({} as ToolServices).find((tool) => tool.name === "run_query")
+  assert.ok(runQuery)
+  assert.ok(!JSON.stringify(runQuery.definition.inputSchema).includes("params"))
+  const input = (query: Record<string, unknown>) => ({
+    connectionId: "6f1d1c6e-8f3e-4f0e-9f1a-2b3c4d5e6f70",
+    purpose: "Orders by status",
+    query: { language: "sql", ...query },
+  })
+  assert.ok(!("error" in runQuery.prepare(input({ sql: "SELECT status FROM orders" }))))
+  const prepared = runQuery.prepare(input({ sql: "SELECT * FROM orders WHERE status = $1", params: ["open"] }))
+  assert.ok("error" in prepared)
+  assert.match(prepared.error, /params/)
 })

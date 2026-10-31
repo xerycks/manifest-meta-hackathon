@@ -11,6 +11,7 @@ export type ErrorCode =
   | "SOURCE_CONNECTION_FAILED"
   | "QUERY_REJECTED"
   | "QUERY_BUSY"
+  | "INVALID_PARAMETERS"
   | "AGENT_NOT_CONFIGURED"
   | "AGENT_BUSY"
   | "TOO_MANY_STREAMS"
@@ -97,12 +98,20 @@ export class AppError extends Error {
     )
   }
 
-  /** Validation refused a query; details name the reason, the offending name, and the recorded execution. */
+  /**
+   * Validation refused a query; details name the reason, the offending name,
+   * and the recorded execution (null when it was only checked, not run).
+   */
   static queryRejected(
     message: string,
-    details: { executionId: string; reason: string | null; name: string | null },
+    details: { executionId: string | null; reason: string | null; name: string | null },
   ): AppError {
     return new AppError(422, "QUERY_REJECTED", message, details)
+  }
+
+  /** A saved query's parameters do not fit its query or the values sent; details name them. */
+  static invalidParameters(message: string, details: unknown): AppError {
+    return new AppError(422, "INVALID_PARAMETERS", message, details)
   }
 
   /** Too many queries are running; the request was not started and may be retried. */

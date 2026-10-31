@@ -9,6 +9,7 @@ import { ok } from "../shared/http/respond.js"
 import { validate } from "../shared/http/validate.js"
 import { currentWorkspace, MANAGER_ROLES, requireMembership } from "./access.js"
 import { WorkspacesRepository, WorkspaceSettingsRepository } from "./repository.js"
+import { TIME_ZONE_SETTING, timeZoneSchema } from "./time-zone.js"
 
 export interface WorkspaceDeps {
   workspaces: WorkspacesRepository
@@ -39,6 +40,11 @@ const settingParamsSchema = z.object({
 const settingBodySchema = z.object({
   value: z.unknown(),
 })
+
+/** Settings that features read with a meaning; their values are checked before they are stored. */
+const SETTING_VALUE_SCHEMAS: Record<string, z.ZodType> = {
+  [TIME_ZONE_SETTING]: timeZoneSchema,
+}
 
 export function workspacesRouter(deps: WorkspaceDeps | null): Router {
   const router = Router()
@@ -117,7 +123,18 @@ export function workspacesRouter(deps: WorkspaceDeps | null): Router {
       const key = req.params.key
       if (!key) throw AppError.badRequest("Missing setting key")
       const { value } = req.body as z.infer<typeof settingBodySchema>
-      ok(res, await deps.settings.set(currentWorkspace(req).id, key, value ?? null))
+      const schema = SETTING_VALUE_SCHEMAS[key]
+      if (!schema) {
+        ok(res, await deps.settings.set(currentWorkspace(req).id, key, value ?? null))
+        return
+      }
+      const parsed = schema.safeParse(value)
+      if (!parsed.success) {
+        throw AppError.validation(parsed.error.issues[0]?.message ?? `Invalid value for "${key}"`, {
+          issues: parsed.error.issues.map((issue) => ({ path: "value", message: issue.message })),
+        })
+      }
+      ok(res, await deps.settings.set(currentWorkspace(req).id, key, parsed.data))
     }),
   )
 

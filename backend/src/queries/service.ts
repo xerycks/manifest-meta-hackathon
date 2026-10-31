@@ -47,6 +47,9 @@ export interface ExecuteInput {
   limits?: Partial<QueryLimits>
   /** Aborting it (for example, the HTTP client went away) cancels the query. */
   signal?: AbortSignal
+  /** A saved query's run: which one, and its parameter values as they resolved. */
+  savedQueryId?: string
+  parameters?: Record<string, string | null>
 }
 
 export interface CancelInput {
@@ -87,6 +90,8 @@ export class QueryExecutor {
       origin: input.origin,
       query: input.query,
       limits: resolveLimits(input.limits),
+      ...(input.savedQueryId ? { savedQueryId: input.savedQueryId } : {}),
+      ...(input.parameters ? { parameters: input.parameters } : {}),
     }
     if (this.runner.find(start.workspaceId, start.id)) throw this.idTaken()
     const connection = await this.connections.get(start.workspaceId, start.connectionId)
@@ -110,6 +115,17 @@ export class QueryExecutor {
       )
     }
     return running
+  }
+
+  /**
+   * Checks a query against the source's current schemas and validators
+   * without running or recording it: null when it may run, otherwise why not.
+   * Throws 404 for an unknown source.
+   */
+  async check(workspaceId: string, connectionId: string, query: ReadQuery): Promise<Rejection | null> {
+    const connection = await this.connections.get(workspaceId, connectionId)
+    const validated = await this.validate(connection, query)
+    return "rejection" in validated ? validated.rejection : null
   }
 
   /**
@@ -162,7 +178,8 @@ export class QueryExecutor {
         connection.id,
         connection.schemas,
       )
-      const rejection = await validateSql(query.sql, { schemas: connection.schemas, objects })
+      const scope = { schemas: connection.schemas, objects }
+      const rejection = await validateSql(query.sql, scope, query.params?.length ?? 0)
       return rejection ? { rejection } : { query }
     }
     return validateMongoQuery(query, connection.schemas)

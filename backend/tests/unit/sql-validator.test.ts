@@ -135,3 +135,15 @@ test("SQL is bounded by its stored size as well as its length", () => {
   // Control characters are escaped six bytes each when the query is recorded.
   assert.equal(sqlQuerySchema.safeParse({ language: "sql", sql: "\u0001".repeat(40_000) }).success, false)
 })
+
+test("parameter values are bounded so the recorded query stays within its column's bound", () => {
+  const sql = `SELECT '${"x".repeat(99_000)}', ${Array.from({ length: 100 }, (_, index) => `$${index + 1}`).join(", ")}`
+  const fits = Array.from({ length: 100 }, () => "x".repeat(400))
+  assert.equal(sqlQuerySchema.safeParse({ language: "sql", sql, params: fits }).success, true)
+  // Each value is short enough, but together, escaped as they are recorded, they are not.
+  const escaped = Array.from({ length: 100 }, () => "\u0001".repeat(1_000))
+  const parsed = sqlQuerySchema.safeParse({ language: "sql", sql, params: escaped })
+  assert.equal(parsed.success, false)
+  assert.match(parsed.error?.issues[0]?.message ?? "", /parameter values are too large/)
+  assert.ok(Buffer.byteLength(JSON.stringify({ language: "sql", sql, params: fits })) <= 300_000)
+})

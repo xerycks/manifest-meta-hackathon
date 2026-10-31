@@ -38,6 +38,9 @@ import { QueryExecutionsRepository } from "../queries/repository.js"
 import { queriesRouter, type QueriesDeps } from "../queries/routes.js"
 import { QueryRunner } from "../queries/runner.js"
 import { QueryExecutor } from "../queries/service.js"
+import { SavedQueriesRepository } from "../saved-queries/repository.js"
+import { savedQueriesRouter, type SavedQueriesDeps } from "../saved-queries/routes.js"
+import { SavedQueriesService } from "../saved-queries/service.js"
 import { SearchRepository } from "../search/repository.js"
 import { searchRouter, type SearchDeps } from "../search/routes.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
@@ -85,6 +88,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let knowledgeDeps: KnowledgeDeps | null = null
   let searchDeps: SearchDeps | null = null
   let queriesDeps: QueriesDeps | null = null
+  let savedQueriesDeps: SavedQueriesDeps | null = null
   let agentDeps: AgentDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
@@ -154,10 +158,26 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
     // Questions read metadata from storage; queries need the key, and tools say so without it.
     const provider = deps.modelProvider !== undefined ? deps.modelProvider : createModelProvider(env)
     const runs = new AgentRunsRepository(pool)
+    savedQueriesDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      savedQueries: executor
+        ? new SavedQueriesService({
+            savedQueries: new SavedQueriesRepository(pool),
+            executions,
+            executor,
+            settings,
+            runs,
+          })
+        : null,
+    }
     agentDeps = {
       workspaces,
       auth,
       sessionSecret,
+      runs,
+      connections: connectionsRepository,
       ...(deps.streamHeartbeatMs !== undefined ? { heartbeatMs: deps.streamHeartbeatMs } : {}),
       agent: provider
         ? new AgentService({
@@ -213,6 +233,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", knowledgeRouter(knowledgeDeps))
   app.use("/api/v1", searchRouter(searchDeps))
   app.use("/api/v1", queriesRouter(queriesDeps))
+  app.use("/api/v1", savedQueriesRouter(savedQueriesDeps))
   app.use("/api/v1", agentRouter(agentDeps))
 
   app.use(notFoundHandler)

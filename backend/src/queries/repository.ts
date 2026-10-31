@@ -30,6 +30,9 @@ export interface ExecutionStart {
   origin: QueryOrigin
   query: ReadQuery
   limits: QueryLimits
+  /** The saved query being run, with its parameter values as they resolved. */
+  savedQueryId?: string
+  parameters?: Record<string, string | null>
 }
 
 export type ExecutionOutcome =
@@ -41,6 +44,8 @@ interface ExecutionRow {
   connection_id: string
   user_id: string | null
   origin: QueryOrigin
+  saved_query_id: string | null
+  parameters: Record<string, string | null> | null
   query: ReadQuery
   max_rows: number
   timeout_ms: number
@@ -55,8 +60,9 @@ interface ExecutionRow {
   finished_at: Date | null
 }
 
-const SUMMARY_COLUMNS = `id, connection_id, user_id, origin, query, max_rows, timeout_ms, status,
-  row_count, truncated, truncated_by, duration_ms, error, created_at, finished_at`
+const SUMMARY_COLUMNS = `id, connection_id, user_id, origin, saved_query_id, parameters, query,
+  max_rows, timeout_ms, status, row_count, truncated, truncated_by, duration_ms, error, created_at,
+  finished_at`
 const RECORD_COLUMNS = `${SUMMARY_COLUMNS}, result`
 
 function toSummary(row: ExecutionRow): ExecutionSummary {
@@ -65,6 +71,8 @@ function toSummary(row: ExecutionRow): ExecutionSummary {
     connectionId: row.connection_id,
     userId: row.user_id,
     origin: row.origin,
+    savedQueryId: row.saved_query_id,
+    parameters: row.parameters,
     language: row.query.language,
     query: row.query,
     limits: { maxRows: row.max_rows, timeoutMs: row.timeout_ms },
@@ -128,9 +136,9 @@ export class QueryExecutionsRepository {
     const { rows } = await this.pool.query<ExecutionRow>(
       `INSERT INTO query_executions
          (id, workspace_id, connection_id, user_id, origin, language, query, max_rows, timeout_ms,
-          status, error, finished_at)
+          status, error, finished_at, saved_query_id, parameters)
        VALUES ($1, $2, $3, $4, $5, $6, $7::json, $8, $9, $10, $11::json,
-               CASE WHEN $12 THEN now() END)
+               CASE WHEN $12 THEN now() END, $13, $14::jsonb)
        RETURNING ${RECORD_COLUMNS}`,
       [
         start.id,
@@ -145,6 +153,8 @@ export class QueryExecutionsRepository {
         initial.status,
         rejected ? JSON.stringify(initial.error) : null,
         rejected,
+        start.savedQueryId ?? null,
+        start.parameters ? JSON.stringify(start.parameters) : null,
       ],
     )
     const record = firstRecord(rows)
@@ -214,6 +224,25 @@ export class QueryExecutionsRepository {
       [workspaceId, ids],
     )
     return rows.map((row) => row.id)
+  }
+
+  /**
+   * A saved query's runs, newest first, without their rows; one more than
+   * `limit` is read so the caller knows whether another page exists.
+   */
+  async listForSavedQuery(
+    workspaceId: string,
+    savedQueryId: string,
+    page: { limit: number; offset: number },
+  ): Promise<ExecutionSummary[]> {
+    const { rows } = await this.pool.query<ExecutionRow>(
+      `SELECT ${SUMMARY_COLUMNS} FROM query_executions
+        WHERE workspace_id = $1 AND saved_query_id = $2
+        ORDER BY created_at DESC, id
+        LIMIT $3 OFFSET $4`,
+      [workspaceId, savedQueryId, page.limit + 1, page.offset],
+    )
+    return rows.map(toSummary)
   }
 
   /** Recent executions on a source, newest first, without their rows. */

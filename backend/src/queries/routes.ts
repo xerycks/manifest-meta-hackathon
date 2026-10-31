@@ -8,11 +8,13 @@ import { ok } from "../shared/http/respond.js"
 import { validate } from "../shared/http/validate.js"
 import { currentRole, currentWorkspace, MANAGER_ROLES, requireMembership } from "../workspaces/access.js"
 import type { WorkspacesRepository } from "../workspaces/repository.js"
+import { resultCsv } from "./csv.js"
 import {
   executionParamsSchema,
   historyQuerySchema,
   queryParamsSchema,
   runQuerySchema,
+  type ExecutionRecord,
   type HistoryQuery,
   type RunQueryInput,
 } from "./schemas.js"
@@ -31,6 +33,12 @@ function param(req: Request, name: "connectionId" | "executionId"): string {
   const value = req.params[name]
   if (!value) throw AppError.badRequest(`Missing ${name}`)
   return value
+}
+
+/** Why an export holds fewer rows than matched: the query's own limit, the stored snapshot, or both. */
+function truncation(record: ExecutionRecord): string | null {
+  const reasons = [record.truncatedBy, record.partialResult ? "snapshot" : null].filter(Boolean)
+  return reasons.length > 0 ? reasons.join(", ") : null
 }
 
 export function queriesRouter(deps: QueriesDeps | null): Router {
@@ -126,6 +134,36 @@ export function queriesRouter(deps: QueriesDeps | null): Router {
           param(req, "executionId"),
         ),
       )
+    }),
+  )
+
+  // The stored rows of any run a member may open, as CSV: the same cells the
+  // run's page shows, in its column order.
+  router.get(
+    `${item}/export.csv`,
+    auth,
+    validate("params", executionParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      const record = await executor.get(
+        currentWorkspace(req).id,
+        param(req, "connectionId"),
+        param(req, "executionId"),
+      )
+      if (!record.result) {
+        throw AppError.conflict("Only a query run that succeeded has rows to export.", {
+          status: record.status,
+        })
+      }
+      const truncated = truncation(record)
+      const day = record.createdAt.slice(0, 10)
+      const filename = `manifest-query-${day}-${record.id.slice(0, 8)}${truncated ? "-partial" : ""}.csv`
+      res.setHeader("Content-Type", "text/csv; charset=utf-8")
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+      res.setHeader("Cache-Control", "private, no-store")
+      res.setHeader("X-Content-Type-Options", "nosniff")
+      if (truncated) res.setHeader("X-Manifest-Truncated", truncated)
+      res.status(200).send(resultCsv(record.result))
     }),
   )
 

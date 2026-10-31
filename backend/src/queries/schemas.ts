@@ -18,6 +18,11 @@ export const QUERY_LIMITS = {
   /** A MongoDB query's JSON, filter and pipeline included. */
   mongoQueryBytes: 100_000,
   pipelineStages: 100,
+  /** Positional parameter values a SQL query may carry, and the length of each text value. */
+  sqlParams: 100,
+  sqlParamChars: 1_000,
+  /** Those values as stored (JSON); with the SQL, every record stays within its column's bound. */
+  sqlParamsJsonBytes: 50_000,
 } as const
 
 export type QueryLanguage = "sql" | "mongodb"
@@ -33,6 +38,17 @@ export type ExecutionStatus =
 
 const document = z.record(z.string(), z.unknown())
 
+/** A bind value; text goes to PostgreSQL untyped, so the SQL around $n decides its type. */
+const sqlParamSchema = z.union([
+  z
+    .string()
+    .max(QUERY_LIMITS.sqlParamChars, `A parameter value can be at most ${QUERY_LIMITS.sqlParamChars} characters`)
+    .refine((value) => !value.includes("\u0000"), "A parameter value cannot contain NUL characters"),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+])
+
 export const sqlQuerySchema = z.strictObject({
   language: z.literal("sql"),
   sql: z
@@ -42,6 +58,18 @@ export const sqlQuerySchema = z.strictObject({
       (sql) => Buffer.byteLength(JSON.stringify(sql)) <= QUERY_LIMITS.sqlJsonBytes,
       "The SQL is too large to record (at most 200 KB)",
     ),
+  /**
+   * Values for $1..$n, bound by position and never written into the SQL.
+   * The SQL must use every one of them and no others.
+   */
+  params: z
+    .array(sqlParamSchema)
+    .max(QUERY_LIMITS.sqlParams, `A query can carry at most ${QUERY_LIMITS.sqlParams} parameter values`)
+    .refine(
+      (params) => Buffer.byteLength(JSON.stringify(params)) <= QUERY_LIMITS.sqlParamsJsonBytes,
+      "The parameter values are too large to record (at most 50 KB together)",
+    )
+    .optional(),
 })
 
 /**
@@ -85,6 +113,7 @@ export const mongoQuerySchema = z
 export const readQuerySchema = z.discriminatedUnion("language", [sqlQuerySchema, mongoQuerySchema])
 
 export type SqlQuery = z.infer<typeof sqlQuerySchema>
+export type SqlParam = z.infer<typeof sqlParamSchema>
 export type MongoQuery = z.infer<typeof mongoQuerySchema>
 /** The one read-query contract for both engines. */
 export type ReadQuery = z.infer<typeof readQuerySchema>
@@ -223,6 +252,10 @@ export interface ExecutionSummary {
   connectionId: string
   userId: string | null
   origin: QueryOrigin
+  /** The saved query this run belongs to; null for other runs or once it is deleted. */
+  savedQueryId: string | null
+  /** A saved query's parameter values as they resolved for this run, by name. */
+  parameters: Record<string, string | null> | null
   language: QueryLanguage
   query: ReadQuery
   limits: QueryLimits

@@ -2,6 +2,7 @@ import express, { Router, type Request } from "express"
 
 import { currentUser, requireAuth, requireCsrf } from "../auth/middleware.js"
 import type { AuthService } from "../auth/service.js"
+import type { ConnectionsRepository } from "../connections/repository.js"
 import { asyncHandler } from "../shared/http/async-handler.js"
 import { AppError } from "../shared/http/errors.js"
 import { EventStream } from "../shared/http/event-stream.js"
@@ -26,6 +27,8 @@ import {
   type RunEventsQuery,
   type StartRunInput,
 } from "./contracts.js"
+import { answerMarkdown } from "./export.js"
+import type { AgentRunsRepository } from "./repository.js"
 import type { AgentService } from "./service.js"
 
 /**
@@ -40,7 +43,10 @@ export interface AgentDeps {
   workspaces: WorkspacesRepository
   auth: AuthService
   sessionSecret: string
-  /** Null without a usable model provider: routes answer 503. */
+  /** Stored runs, for exports that need no model provider. */
+  runs: AgentRunsRepository
+  connections: ConnectionsRepository
+  /** Null without a usable model provider: routes answer 503 (exports still work). */
   agent: AgentService | null
   /** Heartbeat interval of event streams; shorter in tests. */
   heartbeatMs?: number
@@ -82,6 +88,36 @@ export function agentRouter(deps: AgentDeps | null): Router {
   const csrf = requireCsrf(deps.sessionSecret)
   const member = requireMembership(deps.workspaces)
   const agent = deps.agent
+
+  // An answer as a Markdown file, for the user who asked.
+  router.get(
+    `${item}/export.md`,
+    auth,
+    validate("params", runParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      const workspaceId = currentWorkspace(req).id
+      const run = await deps.runs.getRun(workspaceId, currentUser(req).id, param(req, "runId"))
+      if (!run) throw AppError.notFound("Run not found")
+      if (!run.answer) {
+        throw AppError.conflict("This question has no answer to export.", { status: run.status })
+      }
+      const sources = await deps.connections.list(workspaceId)
+      const markdown = answerMarkdown(run, new Map(sources.map((source) => [source.id, source.name])))
+      const slug = run.question
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 50)
+        .replace(/-+$/, "")
+      const filename = `answer-${slug || "question"}-${(run.finishedAt ?? run.createdAt).slice(0, 10)}.md`
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8")
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`)
+      res.setHeader("Cache-Control", "private, no-store")
+      res.setHeader("X-Content-Type-Options", "nosniff")
+      res.status(200).send(markdown)
+    }),
+  )
 
   if (!agent) {
     router.use(base, auth, validate("params", agentParamsSchema), member, (_req, _res, next) =>

@@ -139,6 +139,8 @@ function nameParts(list: unknown): string[] {
 const quoteList = (names: Iterable<string>) => [...names].join(", ") || "none"
 
 class SqlChecker {
+  /** The $n parameter numbers the SQL refers to. */
+  readonly params = new Set<number>()
   private readonly schemas: Set<string>
   private readonly objects: Set<string>
 
@@ -161,6 +163,9 @@ class SqlChecker {
     }
     this.inspect(value, visible)
     for (const [key, child] of Object.entries(value)) {
+      if (key === "ParamRef" && isObject(child) && typeof child.number === "number") {
+        this.params.add(child.number)
+      }
       if (DATA_MODIFYING.has(key)) {
         reject(
           "statement_not_allowed",
@@ -278,7 +283,8 @@ class SqlChecker {
   }
 }
 
-function syntaxError(error: unknown): Rejection {
+/** A parser or scanner error as a syntax_error rejection, with where it happened. */
+export function syntaxError(error: unknown): Rejection {
   const details = (error as { sqlDetails?: { cursorPosition?: number } }).sqlDetails
   const position = details?.cursorPosition
   const message = (error instanceof Error ? error.message : "the SQL could not be parsed").replace(/\.$/, "")
@@ -290,8 +296,27 @@ function syntaxError(error: unknown): Rejection {
   }
 }
 
-/** Null when the SQL may run, otherwise why not. */
-export async function validateSql(sql: string, scope: SqlScope): Promise<Rejection | null> {
+/** The SQL must use $1..$n for its n parameter values, each at least once, and no others. */
+function checkParams(used: ReadonlySet<number>, count: number): Rejection | null {
+  const extra = [...used].filter((number) => number > count).sort((a, b) => a - b)[0]
+  if (extra !== undefined) {
+    const sent =
+      count === 0
+        ? "no parameter values were sent"
+        : `only ${count} parameter value${count === 1 ? " was" : "s were"} sent`
+    return { reason: "invalid_query", message: `The SQL uses $${extra}, but ${sent}.`, name: `$${extra}` }
+  }
+  for (let number = 1; number <= count; number += 1) {
+    if (!used.has(number)) {
+      const message = `Parameter value $${number} is not used by the SQL.`
+      return { reason: "invalid_query", message, name: `$${number}` }
+    }
+  }
+  return null
+}
+
+/** Null when the SQL may run with `paramCount` positional values, otherwise why not. */
+export async function validateSql(sql: string, scope: SqlScope, paramCount = 0): Promise<Rejection | null> {
   let statements: unknown[]
   try {
     statements = (await parse(sql)).stmts ?? []
@@ -315,8 +340,9 @@ export async function validateSql(sql: string, scope: SqlScope): Promise<Rejecti
     return { reason: "statement_not_allowed", message: `${ONLY_READS} This is ${name}.`, name }
   }
   try {
-    new SqlChecker(scope).visit(body, new Set())
-    return null
+    const checker = new SqlChecker(scope)
+    checker.visit(body, new Set())
+    return checkParams(checker.params, paramCount)
   } catch (error) {
     if (error instanceof Rejected) return error.rejection
     // The tree is walked recursively; thousands of nested parts exhaust the stack.

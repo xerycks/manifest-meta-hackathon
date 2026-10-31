@@ -135,9 +135,11 @@ export async function readQueryRows(
   } as QueryConfig)
   signal.throwIfAborted()
   // The extended protocol refuses a second statement, and DECLARE accepts only a query.
+  // Parameter values are bound to the cursor's query, never written into its text.
   await readBounded(client, () =>
     client.query({
       text: `DECLARE ${CURSOR} NO SCROLL CURSOR FOR ${query.sql}`,
+      values: query.params ?? [],
       queryMode: "extended",
       ...call,
     } as QueryConfig),

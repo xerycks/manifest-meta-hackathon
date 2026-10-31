@@ -32,6 +32,8 @@ export function cors(env: Env): RequestHandler {
         "Content-Type, X-Workspace-Id, X-Request-Id, X-Manifest-CSRF",
       )
       res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+      // Exports say when they hold fewer rows than the query matched.
+      res.setHeader("Access-Control-Expose-Headers", "X-Manifest-Truncated")
       if (req.method === "OPTIONS") {
         res.status(204).end()
         return
