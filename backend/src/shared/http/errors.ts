@@ -13,6 +13,7 @@ export type ErrorCode =
   | "QUERY_BUSY"
   | "AGENT_NOT_CONFIGURED"
   | "AGENT_BUSY"
+  | "TOO_MANY_STREAMS"
   | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
 
@@ -122,6 +123,13 @@ export class AppError extends Error {
   /** Too many questions are being answered; the run was not started and may be retried. */
   static agentBusy(message: string, retryAfterSeconds: number): AppError {
     return new AppError(429, "AGENT_BUSY", message, { retryAfterSeconds }, {
+      "Retry-After": String(retryAfterSeconds),
+    })
+  }
+
+  /** The user has as many event streams open as allowed; closing one frees a place. */
+  static tooManyStreams(message: string, retryAfterSeconds: number): AppError {
+    return new AppError(429, "TOO_MANY_STREAMS", message, { retryAfterSeconds }, {
       "Retry-After": String(retryAfterSeconds),
     })
   }

@@ -3,8 +3,17 @@ import { RunEventBus } from "./event-bus.js"
 /** Why a run's signal was aborted from outside. */
 export type AgentStopReason = "cancelled" | "shutdown"
 
-/** Runs answered at once; more fail fast instead of queueing. Limits are per backend process. */
-export const AGENT_CONCURRENCY = { perConversation: 1, perUser: 2, perWorkspace: 5, perProcess: 20 } as const
+/**
+ * Runs answered at once (more fail fast instead of queueing), and event
+ * streams a user may have open. Limits are per backend process.
+ */
+export const AGENT_CONCURRENCY = {
+  perConversation: 1,
+  perUser: 2,
+  perWorkspace: 5,
+  perProcess: 20,
+  streamsPerUser: 10,
+} as const
 
 export interface AgentJob {
   runId: string
@@ -41,6 +50,9 @@ export class AgentRunner {
   readonly events = new RunEventBus()
   private readonly active = new Map<string, Active>()
   private readonly waiting = new Map<string, (answer: string) => Promise<void>>()
+  private readonly streams = new Map<string, number>()
+  /** Ends each open stream, so streams of runs that outlive the process do not hold it open. */
+  private readonly following = new Set<() => void>()
   private stopped = false
 
   constructor(private readonly limits: typeof AGENT_CONCURRENCY = AGENT_CONCURRENCY) {}
@@ -70,6 +82,32 @@ export class AgentRunner {
         if (!active.done) this.active.delete(job.runId)
       },
     }
+  }
+
+  /**
+   * Counts an event stream the user opens; returns the function that counts
+   * it closed (once), or null when the user already has as many open as allowed.
+   * Shutdown calls `end` on each stream still open.
+   */
+  openStream(userId: string, end: () => void): (() => void) | null {
+    const open = this.streams.get(userId) ?? 0
+    if (open >= this.limits.streamsPerUser) return null
+    this.streams.set(userId, open + 1)
+    this.following.add(end)
+    let closed = false
+    return () => {
+      if (closed) return
+      closed = true
+      this.following.delete(end)
+      const left = (this.streams.get(userId) ?? 1) - 1
+      if (left > 0) this.streams.set(userId, left)
+      else this.streams.delete(userId)
+    }
+  }
+
+  /** Shutdown has begun: streams opened now end once they have caught up. */
+  get stopping(): boolean {
+    return this.stopped
   }
 
   /** Aborts a run and waits until it has recorded how it ended; false if it is not running here. */
@@ -114,10 +152,16 @@ export class AgentRunner {
     return true
   }
 
+  /**
+   * Stops the runs here (they record how they ended), then ends the streams
+   * still open: they follow waiting runs, which go on after the restart, and
+   * their clients reconnect to the next process.
+   */
   async shutdown(): Promise<void> {
     this.stopped = true
     const runs = [...this.active.values()]
     for (const run of runs) run.controller.abort("shutdown" satisfies AgentStopReason)
     await Promise.allSettled(runs.map((run) => run.done))
+    for (const end of [...this.following]) end()
   }
 }

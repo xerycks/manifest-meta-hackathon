@@ -12,6 +12,7 @@ import {
   readQuerySchema,
   type Cell,
   type ExecutionRecord,
+  type QueryResult,
   type ReadQuery,
   type ResultColumn,
 } from "../queries/schemas.js"
@@ -25,7 +26,7 @@ import {
   type AgentAnswer,
   type AgentToolName,
   type AttachmentSummary,
-  type Clarification,
+  type ClarificationRequest,
 } from "./contracts.js"
 import type { ToolDefinition } from "./provider.js"
 import type { AgentRunsRepository } from "./repository.js"
@@ -58,6 +59,19 @@ export interface RunExecution {
   truncated: boolean
 }
 
+/** What an answer may cite of a succeeded execution: its query and first rows. */
+export function runExecution(record: ExecutionRecord & { result: QueryResult }): RunExecution {
+  return {
+    id: record.id,
+    connectionId: record.connectionId,
+    query: record.query,
+    columns: record.result.columns,
+    rows: fitting(record.result.rows.slice(0, AGENT_LIMITS.evidenceRows), EVIDENCE_CHARS),
+    rowCount: record.result.rowCount,
+    truncated: record.result.truncated,
+  }
+}
+
 export interface ToolContext {
   workspaceId: string
   userId: string
@@ -68,8 +82,6 @@ export interface ToolContext {
   executions: Map<string, RunExecution>
   /** Files sent in this conversation, which read_attachment may open. */
   attachments: AttachmentSummary[]
-  /** Pauses the run until the user answers; resolves with the answer. */
-  askUser(request: Omit<Clarification, "id">): Promise<string>
 }
 
 export interface ToolSuccess {
@@ -93,7 +105,10 @@ export class ToolError extends Error {
 }
 
 export type PreparedCall =
-  { summary: string; run(context: ToolContext): Promise<ToolSuccess> } | { error: string }
+  | { summary: string; run(context: ToolContext): Promise<ToolSuccess> }
+  /** ask_user: the run waits for the user, whose answer becomes the call's result. */
+  | { summary: string; question: ClarificationRequest }
+  | { error: string }
 
 export interface AgentTool {
   name: AgentToolName
@@ -120,6 +135,12 @@ function inputError(name: string, error: z.ZodError): string {
   return `Invalid input for ${name}: ${issues.join("; ")}. Fix the input and call it again.`
 }
 
+function definition(name: AgentToolName, description: string, input: z.ZodType): ToolDefinition {
+  // Providers take the schema itself, without the JSON Schema dialect marker.
+  const { $schema: _dialect, ...inputSchema } = z.toJSONSchema(input, { io: "input" })
+  return { name, description, inputSchema }
+}
+
 function tool<Schema extends z.ZodType>(spec: {
   name: AgentToolName
   description: string
@@ -127,11 +148,9 @@ function tool<Schema extends z.ZodType>(spec: {
   describe(input: z.output<Schema>): string
   run(input: z.output<Schema>, context: ToolContext): Promise<ToolSuccess>
 }): AgentTool {
-  // Providers take the schema itself, without the JSON Schema dialect marker.
-  const { $schema: _dialect, ...inputSchema } = z.toJSONSchema(spec.input, { io: "input" })
   return {
     name: spec.name,
-    definition: { name: spec.name, description: spec.description, inputSchema },
+    definition: definition(spec.name, spec.description, spec.input),
     prepare(input) {
       const parsed = spec.input.safeParse(input ?? {})
       if (!parsed.success) return { error: inputError(spec.name, parsed.error) }
@@ -458,15 +477,7 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
         )
       }
       const result = record.result
-      context.executions.set(record.id, {
-        id: record.id,
-        connectionId: input.connectionId,
-        query: input.query,
-        columns: result.columns,
-        rows: fitting(result.rows.slice(0, AGENT_LIMITS.evidenceRows), EVIDENCE_CHARS),
-        rowCount: result.rowCount,
-        truncated: result.truncated,
-      })
+      context.executions.set(record.id, runExecution({ ...record, result }))
       const rows = fitting(result.rows.slice(0, ROWS_SHOWN).map(shortCells), OUTPUT_BUDGET)
       return {
         output: {
@@ -523,30 +534,34 @@ export function createAgentTools(services: ToolServices): AgentTool[] {
     },
   })
 
-  const askUser = tool({
+  // The harness does not run this tool: the run waits for the user, and their answer is the result.
+  const askInput = z
+    .object({
+      question: z.string().trim().min(1).max(AGENT_LIMITS.clarificationChars),
+      options: z
+        .array(z.string().trim().min(1).max(AGENT_LIMITS.optionChars))
+        .max(AGENT_LIMITS.clarificationOptions)
+        .default([])
+        .transform((options) => [...new Set(options)])
+        .describe("Suggested answers the user can pick"),
+      allowFreeText: z.boolean().default(true).describe("Whether the user may write another answer"),
+    })
+    .refine((input) => input.allowFreeText || input.options.length >= 2, {
+      message: "Give at least two options, or allow a free-text answer",
+    })
+  const askUser: AgentTool = {
     name: "ask_user",
-    description:
+    definition: definition(
+      "ask_user",
       "Ask the user one short question when the request is ambiguous in a way that changes the answer and neither the data nor its documentation can settle it (for example, whether “top customers” means by revenue or by number of orders). Offer the likely answers as options. The run pauses until the user replies, and the reply comes back as this tool's result. Never ask for something you can look up.",
-    input: z
-      .object({
-        question: z.string().trim().min(1).max(AGENT_LIMITS.clarificationChars),
-        options: z
-          .array(z.string().trim().min(1).max(AGENT_LIMITS.optionChars))
-          .max(AGENT_LIMITS.clarificationOptions)
-          .default([])
-          .transform((options) => [...new Set(options)])
-          .describe("Suggested answers the user can pick"),
-        allowFreeText: z.boolean().default(true).describe("Whether the user may write another answer"),
-      })
-      .refine((input) => input.allowFreeText || input.options.length >= 2, {
-        message: "Give at least two options, or allow a free-text answer",
-      }),
-    describe: (input) => `Asking you: ${snippet(input.question, null, 120)}`,
-    async run(input, context) {
-      const answer = await context.askUser(input)
-      return { output: { answer }, summary: `You answered: ${snippet(answer, null, 120)}` }
+      askInput,
+    ),
+    prepare(input) {
+      const parsed = askInput.safeParse(input ?? {})
+      if (!parsed.success) return { error: inputError("ask_user", parsed.error) }
+      return { summary: `Asking you: ${snippet(parsed.data.question, null, 120)}`, question: parsed.data }
     },
-  })
+  }
 
   const submitAnswer = tool({
     name: "submit_answer",

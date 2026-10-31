@@ -21,10 +21,11 @@ export class RunDeadline {
     this.arm(runMs, "timeout")
   }
 
-  /** Stops the run's clock and starts the wait for an answer. */
-  pause(): void {
+  /** Stops the run's clock and starts the wait for an answer; returns the run's milliseconds left. */
+  pause(): number {
     this.remaining -= Date.now() - this.since
     this.arm(this.answerMs, "answer_timeout")
+    return Math.max(0, this.remaining)
   }
 
   /** Restarts the run's clock with the time it had left. */

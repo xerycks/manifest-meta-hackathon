@@ -13,10 +13,16 @@ import {
   agentParamsSchema,
   answerRunSchema,
   conversationParamsSchema,
+  conversationQuerySchema,
+  listConversationsQuerySchema,
+  renameConversationSchema,
   runEventsQuerySchema,
   runParamsSchema,
   startRunSchema,
   type AnswerRunInput,
+  type ConversationQuery,
+  type ListConversationsQuery,
+  type RenameConversationInput,
   type RunEventsQuery,
   type StartRunInput,
 } from "./contracts.js"
@@ -64,7 +70,8 @@ export function agentRouter(deps: AgentDeps | null): Router {
   const base = "/workspaces/:workspaceId/agent"
   const runs = `${base}/runs`
   const item = `${runs}/:runId`
-  const conversation = `${base}/conversations/:conversationId`
+  const conversations = `${base}/conversations`
+  const conversation = `${conversations}/:conversationId`
 
   if (!deps) {
     router.use(base, (_req, _res, next) => next(AppError.storageNotConfigured()))
@@ -93,7 +100,9 @@ export function agentRouter(deps: AgentDeps | null): Router {
     validate("body", startRunSchema),
     asyncHandler(async (req, res) => {
       const input = req.body as StartRunInput
-      ok(res, await agent.start(currentWorkspace(req), currentUser(req).id, input), 202)
+      const { run, created } = await agent.start(currentWorkspace(req), currentUser(req).id, input)
+      // A question sent again with the same mutationId returns the run it started.
+      ok(res, run, created ? 202 : 200)
     }),
   )
 
@@ -148,7 +157,7 @@ export function agentRouter(deps: AgentDeps | null): Router {
     validate("body", answerRunSchema),
     asyncHandler(async (req, res) => {
       const { answer } = req.body as AnswerRunInput
-      ok(res, await agent.answer(currentWorkspace(req).id, currentUser(req).id, param(req, "runId"), answer))
+      ok(res, await agent.answer(currentWorkspace(req), currentUser(req).id, param(req, "runId"), answer))
     }),
   )
 
@@ -163,16 +172,85 @@ export function agentRouter(deps: AgentDeps | null): Router {
     }),
   )
 
+  // An interrupted question asked again, once, in its conversation.
+  router.post(
+    `${item}/retry`,
+    auth,
+    csrf,
+    validate("params", runParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      const { run, created } = await agent.retry(
+        currentWorkspace(req),
+        currentUser(req).id,
+        param(req, "runId"),
+      )
+      ok(res, run, created ? 202 : 200)
+    }),
+  )
+
+  router.get(
+    conversations,
+    auth,
+    validate("params", agentParamsSchema),
+    member,
+    validate("query", listConversationsQuerySchema),
+    asyncHandler(async (req, res) => {
+      const query = req.query as unknown as ListConversationsQuery
+      ok(res, await agent.list(currentWorkspace(req).id, currentUser(req).id, query))
+    }),
+  )
+
   router.get(
     conversation,
     auth,
     validate("params", conversationParamsSchema),
     member,
+    validate("query", conversationQuerySchema),
     asyncHandler(async (req, res) => {
+      const { before } = req.query as unknown as ConversationQuery
       ok(
         res,
-        await agent.conversation(currentWorkspace(req).id, currentUser(req).id, param(req, "conversationId")),
+        await agent.conversation(
+          currentWorkspace(req).id,
+          currentUser(req).id,
+          param(req, "conversationId"),
+          before,
+        ),
       )
+    }),
+  )
+
+  router.patch(
+    conversation,
+    auth,
+    csrf,
+    validate("params", conversationParamsSchema),
+    member,
+    validate("body", renameConversationSchema),
+    asyncHandler(async (req, res) => {
+      const { title } = req.body as RenameConversationInput
+      ok(
+        res,
+        await agent.rename(
+          currentWorkspace(req).id,
+          currentUser(req).id,
+          param(req, "conversationId"),
+          title,
+        ),
+      )
+    }),
+  )
+
+  router.delete(
+    conversation,
+    auth,
+    csrf,
+    validate("params", conversationParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      await agent.remove(currentWorkspace(req).id, currentUser(req).id, param(req, "conversationId"))
+      ok(res, { deleted: true })
     }),
   )
 

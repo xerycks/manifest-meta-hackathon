@@ -388,10 +388,16 @@ test(
       "the clarification",
     )
     const waiting = await awaitingInput(owner, run.id)
+    const expiresAt = Date.parse(waiting.clarification?.expiresAt ?? "")
+    assert.ok(
+      expiresAt > Date.now() + 25 * 60_000,
+      "the answer is awaited for AGENT_ANSWER_TIMEOUT_MS (30 minutes)",
+    )
     assert.deepEqual(
-      { ...waiting.clarification, id: undefined },
+      { ...waiting.clarification, id: undefined, expiresAt: undefined },
       {
         id: undefined,
+        expiresAt: undefined,
         question: "Rank by revenue or by number of orders?",
         options: ["By revenue", "By number of orders"],
         allowFreeText: false,

@@ -1,4 +1,11 @@
-import type { AgentAnswer, RunEventData, RunEventType, TokenUsage } from "./contracts.js"
+import { snippet } from "../shared/text.js"
+import type {
+  AgentAnswer,
+  ClarificationRequest,
+  RunEventData,
+  RunEventType,
+  TokenUsage,
+} from "./contracts.js"
 import {
   UnparseableToolInput,
   type ModelMessage,
@@ -61,9 +68,24 @@ export interface HarnessProgress {
   usage: TokenUsage
 }
 
+/**
+ * The model asked the user a question (ask_user). The run waits for the
+ * answer, which completes the turn as that call's result.
+ */
+export interface PendingQuestion {
+  callId: string
+  request: ClarificationRequest
+  /** The turn's tool results in call order; the question's own is filled in by answeredTurn. */
+  results: ToolResult[]
+}
+
+/** How the harness stopped: with the submitted answer, or waiting for the user. */
+export type HarnessOutcome = { answer: AgentAnswer } | { question: PendingQuestion }
+
 interface CallOutcome {
   result: ToolResult
   answer?: AgentAnswer
+  question?: ClarificationRequest
 }
 
 const short = (text: string, max = 200) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
@@ -112,6 +134,13 @@ async function executeCall(input: HarnessInput, call: ToolCall): Promise<CallOut
     return { result: { callId: call.id, content: `Error: ${message}`, isError: true } }
   }
   if ("error" in prepared) return failed(prepared.error)
+  if ("question" in prepared) {
+    // Finished once the user answers (answeredTurn).
+    return {
+      result: { callId: call.id, content: "Waiting for the user's answer.", isError: false },
+      question: prepared.question,
+    }
+  }
   try {
     const success = await prepared.run(context)
     emit("tool.finished", {
@@ -133,6 +162,8 @@ async function executeCall(input: HarnessInput, call: ToolCall): Promise<CallOut
   }
 }
 
+type AskedQuestion = ClarificationRequest & { callId: string }
+
 const refused = (call: ToolCall, message: string): ToolResult => ({
   callId: call.id,
   content: `Error: ${message}`,
@@ -141,7 +172,7 @@ const refused = (call: ToolCall, message: string): ToolResult => ({
 
 /**
  * Runs the turn's tool calls (a bounded number, a few at a time) and returns
- * their results in call order. ask_user and then submit_answer run after the
+ * their results in call order. ask_user and then submit_answer come after the
  * others, so the user is asked, or the run ends, only once they are done. One
  * question per turn; an answer submitted alongside a question, or after an
  * accepted one, is refused.
@@ -149,7 +180,7 @@ const refused = (call: ToolCall, message: string): ToolResult => ({
 async function executeCalls(
   input: HarnessInput,
   calls: ToolCall[],
-): Promise<{ results: ToolResult[]; answer?: AgentAnswer }> {
+): Promise<{ results: ToolResult[]; answer?: AgentAnswer; question?: AskedQuestion }> {
   const allowed = calls.slice(0, MAX_TOOL_CALLS_PER_TURN)
   const last = (call: ToolCall) => call.name === "ask_user" || call.name === "submit_answer"
   const outcomes = new Map<string, ToolResult>()
@@ -161,13 +192,18 @@ async function executeCalls(
     },
   )
   const questions = allowed.filter((call) => call.name === "ask_user")
+  let question: AskedQuestion | undefined
   for (const [index, call] of questions.entries()) {
-    outcomes.set(
-      call.id,
-      index === 0
-        ? (await executeCall(input, call)).result
-        : refused(call, "Ask one question at a time. Ask this one after the user has answered the first."),
-    )
+    if (index > 0) {
+      outcomes.set(
+        call.id,
+        refused(call, "Ask one question at a time. Ask this one after the user has answered the first."),
+      )
+      continue
+    }
+    const outcome = await executeCall(input, call)
+    outcomes.set(call.id, outcome.result)
+    if (outcome.question) question = { ...outcome.question, callId: call.id }
   }
   let answer: AgentAnswer | undefined
   for (const call of allowed.filter((entry) => entry.name === "submit_answer")) {
@@ -191,18 +227,40 @@ async function executeCalls(
         `Too many tool calls in one turn (at most ${MAX_TOOL_CALLS_PER_TURN}). Make this call again in your next turn.`,
       ),
   )
-  return answer ? { results, answer } : { results }
+  return { results, ...(answer ? { answer } : {}), ...(question ? { question } : {}) }
+}
+
+/**
+ * Completes a turn that asked the user: their answer becomes the question's
+ * result. Returns the turn's tool results for the model.
+ */
+export function answeredTurn(question: PendingQuestion, answer: string, emit: EmitEvent): ModelMessage {
+  emit("tool.finished", {
+    callId: question.callId,
+    tool: "ask_user",
+    ok: true,
+    summary: `You answered: ${snippet(answer, null, 120)}`,
+  })
+  return {
+    role: "tool",
+    results: question.results.map((result) =>
+      result.callId === question.callId
+        ? { callId: question.callId, content: JSON.stringify({ answer }), isError: false }
+        : result,
+    ),
+  }
 }
 
 /**
  * The agent loop: a model turn, then its tool calls, then the results back to
- * the model, until it submits an answer. Bounded by the step limit and the
+ * the model, until it submits an answer or asks the user a question (then the
+ * turn's results wait for answeredTurn). Bounded by the step limit and the
  * signal (cancel, deadline, shutdown), which rejects with the abort reason.
  * Problems a tool reports go back to the model; only the limits, provider
  * failures, refusals, and truncated output fail the run (with RunFailure or
  * ModelProviderError).
  */
-export async function runHarness(input: HarnessInput, progress: HarnessProgress): Promise<AgentAnswer> {
+export async function runHarness(input: HarnessInput, progress: HarnessProgress): Promise<HarnessOutcome> {
   const { provider, messages, signal, emit } = input
   const tools = input.tools.map((tool) => tool.definition)
   let unparseable = 0
@@ -266,9 +324,13 @@ export async function runHarness(input: HarnessInput, progress: HarnessProgress)
       messages.push({ role: "user", text: NUDGE })
       continue
     }
-    const { results, answer } = await executeCalls(input, turn.toolCalls)
+    const { results, answer, question } = await executeCalls(input, turn.toolCalls)
+    if (question) {
+      const { callId, ...request } = question
+      return { question: { callId, request, results } }
+    }
     messages.push({ role: "tool", results })
-    if (answer) return answer
+    if (answer) return { answer }
   }
   throw new RunFailure(
     "AGENT_STEP_LIMIT",

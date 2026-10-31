@@ -20,8 +20,11 @@ if (pool) {
   if (interrupted > 0) console.warn(`Marked ${interrupted} interrupted manifest refresh(es) as failed.`)
   const queriesInterrupted = await new QueryExecutionsRepository(pool).failInterrupted()
   if (queriesInterrupted > 0) console.warn(`Marked ${queriesInterrupted} interrupted query(ies) as failed.`)
-  const runsInterrupted = await new AgentRunsRepository(pool).failInterrupted()
-  if (runsInterrupted > 0) console.warn(`Marked ${runsInterrupted} interrupted agent run(s) as failed.`)
+  const runs = await new AgentRunsRepository(pool).recoverAfterRestart()
+  if (runs.interrupted > 0)
+    console.warn(`Marked ${runs.interrupted} agent run(s) as interrupted (retryable).`)
+  if (runs.expired > 0)
+    console.warn(`Stopped ${runs.expired} agent run(s) whose clarification went unanswered.`)
   if (!env.CONNECTION_ENCRYPTION_KEY) {
     console.warn("CONNECTION_ENCRYPTION_KEY is not set — source connection endpoints will return 503.")
   }

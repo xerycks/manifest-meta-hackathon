@@ -9,6 +9,7 @@ import { demoScript } from "../../src/agent/demo-model.js"
 import { RunEventBus } from "../../src/agent/event-bus.js"
 import { AgentRunner } from "../../src/agent/runner.js"
 import { scriptView } from "../../src/agent/scripted.js"
+import { AgentService, type AgentServiceDeps } from "../../src/agent/service.js"
 import { AppError } from "../../src/shared/http/errors.js"
 
 const base64 = (text: string | Buffer) => Buffer.from(text).toString("base64")
@@ -73,7 +74,8 @@ test("file slices stay within their byte budget and never split a character", ()
 test("the run deadline pauses while waiting for the user and keeps the time that was left", async () => {
   const deadline = new RunDeadline(120, 1_000)
   await sleep(60)
-  deadline.pause()
+  const left = deadline.pause()
+  assert.ok(left > 0 && left <= 70, `about 60 ms of the run's time are left (${left})`)
   await sleep(150)
   assert.equal(deadline.signal.aborted, false, "waiting for the user does not use the run's time")
   deadline.resume()
@@ -121,6 +123,57 @@ test("a waiting run takes one answer, recorded before it goes on; a stopped run 
   await assert.rejects(stopped, (reason: unknown) => reason === "cancelled")
   assert.equal(await runner.answer("run-2", "Too late"), false)
 })
+
+test("shutdown ends the event streams still open once the runs here have stopped", async () => {
+  const runner = new AgentRunner()
+  const log: string[] = []
+  const slot = runner.claim({ runId: "run-1", workspaceId: "ws", userId: "user", conversationId: "chat" })
+  assert.ok(!("busy" in slot))
+  slot.start(async (signal) => {
+    await new Promise((resolve) => signal.addEventListener("abort", resolve))
+    log.push("run stopped")
+  })
+  runner.openStream("user", () => log.push("open stream ended"))
+  const close = runner.openStream("user", () => log.push("closed stream ended"))
+  close?.()
+  assert.equal(runner.stopping, false)
+  await runner.shutdown()
+  assert.equal(runner.stopping, true)
+  assert.deepEqual(log, ["run stopped", "open stream ended"])
+})
+
+test(
+  "a stream sends a terminal event recorded after its replay was read; one opened during shutdown ends",
+  async () => {
+    const event = (seq: number, type: RunEvent["type"]) =>
+      ({ seq, type, data: {}, createdAt: new Date().toISOString() }) as RunEvent
+    let status = "cancelled"
+    // The run ends between the replay and the status check, and its terminal event never comes live.
+    const reads = [[event(1, "run.started")], [event(1, "run.started"), event(2, "run.cancelled")]]
+    const runs = {
+      getRun: async () => ({ status }),
+      events: async (_workspaceId: string, _userId: string, _runId: string, after: number) =>
+        (reads.shift() ?? []).filter((item) => item.seq > after),
+    }
+    const runner = new AgentRunner()
+    const service = new AgentService({ runs, runner } as unknown as AgentServiceDeps)
+    const follow = async () => {
+      const seen = { sent: [] as number[], ended: 0 }
+      await service.follow("ws", "user", "run-1", 0, {
+        send: (item) => seen.sent.push(item.seq),
+        end: () => (seen.ended += 1),
+      })
+      return seen
+    }
+    assert.deepEqual(await follow(), { sent: [1, 2], ended: 1 })
+    assert.equal(runner.events.followers("run-1"), 0)
+
+    status = "awaiting_input"
+    reads.push([event(1, "run.started")])
+    await runner.shutdown()
+    assert.deepEqual(await follow(), { sent: [1], ended: 1 }, "caught up, then ended for the next process")
+  },
+)
 
 test("the demo model asks which ranking “top customers” means, unless the question says", () => {
   const listed = {

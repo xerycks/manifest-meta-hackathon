@@ -5,11 +5,13 @@ import { z } from "zod"
 
 import type { AgentAnswer, AgentToolName, RunEventType } from "../../src/agent/contracts.js"
 import {
+  answeredTurn,
   MAX_TOOL_CALLS_PER_TURN,
   NUDGE,
   runHarness,
   RunFailure,
   storedTranscript,
+  type EmitEvent,
   type HarnessProgress,
 } from "../../src/agent/harness.js"
 import {
@@ -50,10 +52,25 @@ function fakeTool(
   }
 }
 
-function setup(
-  script: Script | ModelProvider,
-  options: { maxSteps?: number; signal?: AbortSignal; reply?: string } = {},
-) {
+/** ask_user as the harness sees it: a valid call becomes a question for the user. */
+function askTool(log: string[]): AgentTool {
+  const input = z.object({ question: z.string() })
+  return {
+    name: "ask_user",
+    definition: { name: "ask_user", description: "ask_user", inputSchema: { type: "object" } },
+    prepare(raw) {
+      const parsed = input.safeParse(raw)
+      if (!parsed.success) return { error: "Invalid input for ask_user" }
+      log.push("ask_user")
+      return {
+        summary: `Asking you: ${parsed.data.question}`,
+        question: { question: parsed.data.question, options: [], allowFreeText: true },
+      }
+    },
+  }
+}
+
+function setup(script: Script | ModelProvider, options: { maxSteps?: number; signal?: AbortSignal } = {}) {
   const events: { type: RunEventType; data: unknown }[] = []
   const log: string[] = []
   const messages: ModelMessage[] = [{ role: "user", text: "How many orders?" }]
@@ -71,21 +88,12 @@ function setup(
       },
       log,
     ),
-    fakeTool(
-      "ask_user",
-      z.object({ question: z.string() }),
-      (value, context) =>
-        context.askUser({
-          question: (value as { question: string }).question,
-          options: [],
-          allowFreeText: true,
-        }),
-      log,
-    ),
+    askTool(log),
     fakeTool("submit_answer", z.object({ markdown: z.string() }), () => ANSWER, log),
   ]
   const provider = typeof script === "function" ? new ScriptedProvider("test", script) : script
-  const run = () =>
+  const emit: EmitEvent = (type, data) => events.push({ type, data })
+  const outcome = () =>
     runHarness(
       {
         provider,
@@ -99,18 +107,20 @@ function setup(
           signal,
           executions: new Map(),
           attachments: [],
-          askUser: async () => {
-            log.push("asked")
-            return options.reply ?? "By revenue"
-          },
         },
         maxSteps: options.maxSteps ?? 12,
         signal,
-        emit: (type, data) => events.push({ type, data }),
+        emit,
       },
       progress,
     )
-  return { run, events, log, messages, progress }
+  /** Runs until the answer is submitted. */
+  const run = async () => {
+    const result = await outcome()
+    assert.ok("answer" in result, "the run submitted an answer")
+    return result.answer
+  }
+  return { run, outcome, emit, events, log, messages, progress }
 }
 
 const submit = { name: "submit_answer", input: { markdown: "42 orders." } }
@@ -234,9 +244,9 @@ test("a turn runs a bounded number of calls, and submit_answer after the others"
   )
 })
 
-test("ask_user runs after the other calls, one per turn, and holds back an answer submitted with it", async () => {
+test("ask_user comes after the other calls, one per turn; the turn waits for the answer and holds back an answer submitted with it", async () => {
   const ask = (question: string) => ({ name: "ask_user", input: { question } })
-  const { run, log, messages } = setup((view) => {
+  const { run, outcome, emit, events, log, messages } = setup((view) => {
     if (view.turn === 0) {
       return {
         calls: [
@@ -247,16 +257,41 @@ test("ask_user runs after the other calls, one per turn, and holds back an answe
         ],
       }
     }
+    assert.deepEqual(view.results.find((result) => result.name === "ask_user")?.output, {
+      answer: "By revenue",
+    })
     return { calls: [submit] }
   })
+  const asked = await outcome()
+  assert.ok("question" in asked, "the run waits for the user")
+  assert.deepEqual(log, ["list_sources", "ask_user"])
+  assert.deepEqual(asked.question.request, {
+    question: "Revenue or orders?",
+    options: [],
+    allowFreeText: true,
+  })
+  assert.equal(messages.length, 2, "the turn's results wait for the answer")
+  const [question, held, second, listed] = asked.question.results
+  assert.equal(question?.callId, asked.question.callId)
+  assert.match(held?.content ?? "", /^Error: Read the user's answer before submitting/)
+  assert.match(second?.content ?? "", /^Error: Ask one question at a time/)
+  assert.equal(listed?.isError, false)
+  assert.ok(
+    !events.some(
+      (event) => event.type === "tool.finished" && (event.data as { tool: string }).tool === "ask_user",
+    ),
+  )
+
+  messages.push(answeredTurn(asked.question, "By revenue", emit))
+  assert.deepEqual(events.at(-1), {
+    type: "tool.finished",
+    data: { callId: asked.question.callId, tool: "ask_user", ok: true, summary: "You answered: By revenue" },
+  })
   assert.deepEqual(await run(), ANSWER)
-  assert.deepEqual(log.slice(0, 3), ["list_sources", "ask_user", "asked"])
-  const first = messages[2]
-  assert.ok(first?.role === "tool")
-  assert.deepEqual(JSON.parse(first.results[0]?.content ?? ""), "By revenue")
-  assert.match(first.results[1]?.content ?? "", /^Error: Read the user's answer before submitting/)
-  assert.match(first.results[2]?.content ?? "", /^Error: Ask one question at a time/)
-  assert.equal(first.results[3]?.isError, false)
+  const answered = messages[2]
+  assert.ok(answered?.role === "tool")
+  assert.deepEqual(JSON.parse(answered.results[0]?.content ?? ""), { answer: "By revenue" })
+  assert.deepEqual(answered.results.slice(1), asked.question.results.slice(1))
 })
 
 test("streamed text is recorded once enough has gathered, or after a short pause", async () => {

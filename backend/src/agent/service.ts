@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 
 import type { ConnectionsRepository } from "../connections/repository.js"
+import type { QueryExecutionsRepository } from "../queries/repository.js"
 import { AppError } from "../shared/http/errors.js"
 import { isUniqueViolation } from "../shared/postgres/errors.js"
 import type { Workspace, WorkspaceSettingsRepository } from "../workspaces/repository.js"
@@ -14,7 +15,10 @@ import {
   type AgentRunWithEvents,
   type AttachmentSummary,
   type Clarification,
+  type Conversation,
+  type ConversationPage,
   type ConversationWithRuns,
+  type ListConversationsQuery,
   type RunError,
   type RunEvent,
   type RunEventData,
@@ -23,22 +27,37 @@ import {
 } from "./contracts.js"
 import { RunDeadline, type DeadlineReason } from "./deadline.js"
 import type { RunEventBus } from "./event-bus.js"
-import { runHarness, RunFailure, storedTranscript, type HarnessProgress } from "./harness.js"
+import {
+  answeredTurn,
+  runHarness,
+  RunFailure,
+  storedTranscript,
+  type HarnessProgress,
+  type PendingQuestion,
+} from "./harness.js"
 import { buildInstructions } from "./instructions.js"
 import { ModelProviderError, type ModelMessage, type ModelProvider } from "./provider.js"
-import type { AgentRunsRepository, PriorTurn, RunOutcome } from "./repository.js"
-import type { AgentBusy, AgentRunner, AgentStopReason } from "./runner.js"
+import {
+  INTERRUPTED,
+  type AgentRunsRepository,
+  type NewRun,
+  type PriorTurn,
+  type RunCheckpoint,
+  type RunOutcome,
+} from "./repository.js"
+import type { AgentBusy, AgentRunner, AgentSlot, AgentStopReason } from "./runner.js"
 import { formatSourceContext, loadSourceContext, type SourceContextDeps } from "./source-context.js"
-import type { AgentTool } from "./tools.js"
+import { runExecution, type AgentTool, type RunExecution } from "./tools.js"
 
 const BUSY_RETRY_AFTER_SECONDS = 10
+const STREAM_RETRY_AFTER_SECONDS = 5
 /** Earlier questions of a conversation given to the model, and their characters in total. */
 const PRIOR_TURNS = 6
 const PRIOR_CHARS = 16_000
-/** Runs a conversation read returns, the latest ones. */
-const CONVERSATION_RUNS = 50
 /** Files of a conversation the model is told about, the latest ones. */
 const CONVERSATION_FILES = 30
+const MUTATION_INDEX = "agent_runs_mutation_idx"
+const RETRY_INDEX = "agent_runs_retry_idx"
 
 export interface AgentLimits {
   maxSteps: number
@@ -51,6 +70,7 @@ export interface AgentServiceDeps extends SourceContextDeps {
   runs: AgentRunsRepository
   connections: ConnectionsRepository
   settings: WorkspaceSettingsRepository
+  executions: QueryExecutionsRepository
   tools: AgentTool[]
   provider: ModelProvider
   runner: AgentRunner
@@ -67,6 +87,10 @@ function conversationBusy(): AppError {
   return AppError.conflict(
     "This conversation is still answering a question. Wait for it to finish, or cancel it.",
   )
+}
+
+function mutationTaken(): AppError {
+  return AppError.conflict("This mutationId was already used for another question. Send a new one.")
 }
 
 function duration(ms: number): string {
@@ -116,14 +140,24 @@ function questionMessage(run: AgentRun, files: AttachmentSummary[]): string {
   ].join("\n")
 }
 
+/** What a run that ends without going on (cancelled or timed out while waiting) used, from its checkpoint. */
+function usedSoFar(run: AgentRun, checkpoint: RunCheckpoint | null) {
+  return {
+    answer: null,
+    usage: checkpoint?.usage ?? run.usage,
+    steps: checkpoint?.steps ?? run.steps,
+    transcript: checkpoint ? storedTranscript(checkpoint.messages) : [],
+  }
+}
+
 /**
- * Records a run's events in order, numbered from 1, and hands each to the
- * streams following the run once recorded. A failed write is logged, not
- * fatal, and the event is still streamed.
+ * Records a run's events in order and hands each to the streams following
+ * the run once it is recorded. Events that change the run's state are
+ * written together with the change (see AgentRunsRepository). A plain event
+ * that cannot be recorded is logged and not streamed; the run goes on.
  */
 class RunEvents {
-  private seq = 0
-  private pending: Promise<void> = Promise.resolve()
+  private pending: Promise<unknown> = Promise.resolve()
 
   constructor(
     private readonly runs: AgentRunsRepository,
@@ -133,32 +167,73 @@ class RunEvents {
   ) {}
 
   readonly emit = <T extends RunEventType>(type: T, data: RunEventData[T]): void => {
-    const event = { seq: (this.seq += 1), type, data }
-    this.pending = this.pending
-      .then(() => this.runs.appendEvent(this.workspaceId, this.runId, event))
-      .catch((error: unknown) => {
-        console.error(`Could not record event ${event.seq} of agent run ${this.runId}`, error)
-        return new Date().toISOString()
-      })
-      .then((createdAt) => this.bus.publish(this.runId, { ...event, createdAt } as RunEvent))
+    this.record(() => this.runs.appendEvent(this.workspaceId, this.runId, { type, data })).catch(
+      (error: unknown) => console.error(`Could not record a ${type} event of agent run ${this.runId}`, error),
+    )
   }
 
-  flush(): Promise<void> {
-    return this.pending
+  /** Records a state change with its event, after the events before it; resolves with whether it applied. */
+  async change(write: () => Promise<RunEvent | null>): Promise<boolean> {
+    return (await this.record(write)) !== null
+  }
+
+  private record(write: () => Promise<RunEvent | null>): Promise<RunEvent | null> {
+    const recorded = this.pending.then(async () => {
+      const event = await write()
+      if (event) this.bus.publish(this.runId, event)
+      return event
+    })
+    this.pending = recorded.catch(() => null)
+    return recorded
   }
 }
+
+/** A run being worked on in this process. */
+interface Job {
+  workspace: Workspace
+  run: AgentRun
+  events: RunEvents
+  deadline: RunDeadline
+  /** Cancel, shutdown, or the deadline. */
+  signal: AbortSignal
+}
+
+/** What the model works with; it grows as the run goes. */
+interface RunState {
+  system: string
+  files: AttachmentSummary[]
+  messages: ModelMessage[]
+  executions: Map<string, RunExecution>
+  progress: HarnessProgress
+}
+
+type Result =
+  | { status: "completed"; answer: AgentAnswer }
+  | { status: "failed" | "interrupted"; error: RunError }
+  | { status: "cancelled" }
 
 /**
  * Answers questions in the background: each run gathers its sources'
  * context, drives the model through the harness, and records its events,
- * its answer or failure, usage, and transcript.
+ * its answer or failure, usage, and transcript. A run waiting for the user
+ * keeps a checkpoint, so it can still be answered after a restart.
  */
 export class AgentService {
   constructor(private readonly deps: AgentServiceDeps) {}
 
-  /** Records a queued run with its files and starts answering it; progress is read from the run. */
-  async start(workspace: Workspace, userId: string, input: StartRunInput): Promise<AgentRun> {
-    const { runs, runner, provider } = this.deps
+  /**
+   * Records a queued run with its files and starts answering it; progress is
+   * read from the run. A question sent again with the same mutation id
+   * returns the run it started (created: false).
+   */
+  async start(
+    workspace: Workspace,
+    userId: string,
+    input: StartRunInput,
+  ): Promise<{ run: AgentRun; created: boolean }> {
+    const { mutationId } = input
+    const sent = mutationId ? await this.sentBefore(workspace.id, userId, mutationId, input) : null
+    if (sent) return { run: sent, created: false }
     const attachments = decodeAttachments(input.attachments ?? [])
     const connectionIds = input.connectionIds ?? []
     if (connectionIds.length > 0) {
@@ -170,49 +245,83 @@ export class AgentService {
         })
       }
     }
-    if (input.conversationId && !(await runs.getConversation(workspace.id, userId, input.conversationId))) {
+    if (
+      input.conversationId &&
+      !(await this.deps.runs.getConversation(workspace.id, userId, input.conversationId))
+    ) {
       throw AppError.notFound("Conversation not found")
     }
-
-    const runId = randomUUID()
-    const conversationId = input.conversationId ?? randomUUID()
-    const slot = runner.claim({ runId, workspaceId: workspace.id, userId, conversationId })
-    if ("busy" in slot) {
-      if (slot.busy === "conversation") throw conversationBusy()
-      throw AppError.agentBusy(BUSY_MESSAGES[slot.busy], BUSY_RETRY_AFTER_SECONDS)
-    }
-    let run: AgentRun | null
     try {
-      if (!input.conversationId) {
-        await runs.createConversation({
-          id: conversationId,
-          workspaceId: workspace.id,
-          userId,
-          title: input.question.slice(0, AGENT_LIMITS.titleChars).trim(),
-        })
-      }
-      run = await runs.insertRun({
-        id: runId,
-        workspaceId: workspace.id,
-        conversationId,
+      const run = await this.queue(workspace, {
+        id: randomUUID(),
+        conversationId: input.conversationId ?? randomUUID(),
+        ...(input.conversationId
+          ? {}
+          : { newConversation: { title: input.question.slice(0, AGENT_LIMITS.titleChars).trim() } }),
         userId,
         question: input.question,
         connectionIds,
-        provider: provider.provider,
-        model: provider.model,
         attachments,
+        ...(mutationId ? { mutationId } : {}),
       })
+      return { run, created: true }
     } catch (error) {
-      slot.release()
+      if (mutationId && isUniqueViolation(error, MUTATION_INDEX)) {
+        // Sent twice at once (the other request won), or the id was used in another workspace.
+        const winner = await this.sentBefore(workspace.id, userId, mutationId, input)
+        if (winner) return { run: winner, created: false }
+        throw mutationTaken()
+      }
       throw isUniqueViolation(error) ? conversationBusy() : error
     }
-    if (!run) {
-      slot.release()
-      throw AppError.notFound("Conversation not found")
+  }
+
+  /**
+   * Asks an interrupted question again as a new run in its conversation, with
+   * the same sources and files. Each interrupted run is retried once; asking
+   * again returns that retry (created: false).
+   */
+  async retry(
+    workspace: Workspace,
+    userId: string,
+    runId: string,
+  ): Promise<{ run: AgentRun; created: boolean }> {
+    const { runs } = this.deps
+    const interrupted = await runs.getRun(workspace.id, userId, runId)
+    if (!interrupted) throw AppError.notFound("Run not found")
+    const retried = await runs.findRetry(workspace.id, userId, runId)
+    if (retried) return { run: retried, created: false }
+    if (interrupted.status !== "interrupted") {
+      throw AppError.conflict(
+        "Only a question interrupted by a restart can be retried. Ask it again instead.",
+        {
+          status: interrupted.status,
+        },
+      )
     }
-    const queued = run
-    slot.start((signal) => this.execute(workspace, queued, signal))
-    return queued
+    if (interrupted.disposition !== "retry") {
+      throw AppError.conflict(
+        "This question started actions with effects before it was interrupted. Check what they changed before asking again.",
+        { disposition: interrupted.disposition },
+      )
+    }
+    try {
+      const run = await this.queue(workspace, {
+        id: randomUUID(),
+        conversationId: interrupted.conversationId,
+        userId,
+        question: interrupted.question,
+        connectionIds: interrupted.connectionIds,
+        retryOf: interrupted.id,
+      })
+      return { run, created: true }
+    } catch (error) {
+      if (isUniqueViolation(error, RETRY_INDEX)) {
+        const winner = await runs.findRetry(workspace.id, userId, runId)
+        if (winner) return { run: winner, created: false }
+      }
+      throw isUniqueViolation(error) ? conversationBusy() : error
+    }
   }
 
   async get(workspaceId: string, userId: string, runId: string, after = 0): Promise<AgentRunWithEvents> {
@@ -221,23 +330,62 @@ export class AgentService {
     return { ...run, events: await this.deps.runs.events(workspaceId, userId, runId, after) }
   }
 
-  /** The user's conversation with its latest runs and their events. */
+  /** The user's conversations, newest activity first. */
+  list(workspaceId: string, userId: string, query: ListConversationsQuery): Promise<ConversationPage> {
+    return this.deps.runs.listConversations(workspaceId, userId, query)
+  }
+
+  /** The user's conversation with its latest runs (older than run `before`) and their events. */
   async conversation(
     workspaceId: string,
     userId: string,
     conversationId: string,
+    before?: string,
   ): Promise<ConversationWithRuns> {
-    const found = await this.deps.runs.conversation(workspaceId, userId, conversationId, CONVERSATION_RUNS)
+    const found = await this.deps.runs.conversation(workspaceId, userId, conversationId, {
+      limit: AGENT_LIMITS.conversationRuns,
+      before,
+    })
     if (!found) throw AppError.notFound("Conversation not found")
-    return { ...found.conversation, runs: found.runs }
+    return { ...found.conversation, runs: found.runs, hasEarlier: found.hasEarlier }
+  }
+
+  async rename(
+    workspaceId: string,
+    userId: string,
+    conversationId: string,
+    title: string,
+  ): Promise<Conversation> {
+    const renamed = await this.deps.runs.renameConversation(workspaceId, userId, conversationId, title)
+    if (!renamed) throw AppError.notFound("Conversation not found")
+    return renamed
+  }
+
+  /** Deletes the user's conversation, stopping its active run first. */
+  async remove(workspaceId: string, userId: string, conversationId: string): Promise<void> {
+    const { runs } = this.deps
+    if (!(await runs.getConversation(workspaceId, userId, conversationId))) {
+      throw AppError.notFound("Conversation not found")
+    }
+    const active = await runs.activeRunId(workspaceId, userId, conversationId)
+    if (active) {
+      await this.cancel(workspaceId, userId, active).catch((error: unknown) => {
+        // It finished meanwhile, or runs in another process: deleting it stops it from being shown.
+        if (!(error instanceof AppError && error.status === 409)) throw error
+      })
+    }
+    if (!(await runs.deleteConversation(workspaceId, userId, conversationId))) {
+      throw AppError.notFound("Conversation not found")
+    }
   }
 
   /**
    * Follows a run: its stored events after `after`, then live ones as they are
    * recorded, each once and in order, until the run's terminal event (or, for
-   * a run that has ended, its stored events), when `end` is called. Rejects
-   * with 404, before sending anything, unless the run is the user's. Resolves
-   * with a function that stops following.
+   * a run that has ended, its stored events) or a shutdown, when `end` is called. Rejects
+   * with 404, before sending anything, unless the run is the user's, and with
+   * 429 when the user has too many streams open. Resolves with a function
+   * that stops following.
    */
   async follow(
     workspaceId: string,
@@ -253,18 +401,32 @@ export class AgentService {
     let ended = false
     const early: RunEvent[] = []
     let unsubscribe = () => {}
+    let release = () => {}
     const stop = () => {
       ended = true
       unsubscribe()
+      release()
     }
+    const end = () => {
+      stop()
+      handlers.end()
+    }
+    const opened = runner.openStream(userId, end)
+    if (!opened) {
+      throw AppError.tooManyStreams(
+        "You are following too many questions at once. Close some Ask tabs, then try again.",
+        STREAM_RETRY_AFTER_SECONDS,
+      )
+    }
+    release = opened
     const deliver = (event: RunEvent) => {
-      if (ended || event.seq <= last) return
-      last = event.seq
-      handlers.send(event)
-      if (TERMINAL_EVENT_TYPES.includes(event.type)) {
-        stop()
-        handlers.end()
+      if (ended) return
+      if (event.seq > last) {
+        last = event.seq
+        handlers.send(event)
       }
+      // Nothing follows a terminal event, also one the client already has.
+      if (TERMINAL_EVENT_TYPES.includes(event.type)) end()
     }
     // Listen first, so nothing recorded during the replay is missed; repeats are dropped by seq.
     unsubscribe = runner.events.subscribe(runId, (event) => (live ? deliver(event) : early.push(event)))
@@ -274,9 +436,13 @@ export class AgentService {
       for (const event of early.sort((a, b) => a.seq - b.seq)) deliver(event)
       const run = await runs.getRun(workspaceId, userId, runId)
       if (!ended && (!run || !ACTIVE_RUN_STATUSES.includes(run.status))) {
-        stop()
-        handlers.end()
+        // It ended after the replay was read, and its terminal event (recorded
+        // with the final status) may not have been handed over yet: read it.
+        for (const event of await runs.events(workspaceId, userId, runId, last)) deliver(event)
+        if (!ended) end()
       }
+      // Shutting down: the client reconnects to the next process.
+      if (!ended && runner.stopping) end()
     } catch (error) {
       stop()
       throw error
@@ -284,14 +450,17 @@ export class AgentService {
     return stop
   }
 
-  /** Gives a run waiting for the user its answer, and resolves once the run has it. */
+  /**
+   * Gives a run waiting for the user its answer, and resolves once the run
+   * has it. A run that waits from before a restart goes on from its checkpoint.
+   */
   async answer(
-    workspaceId: string,
+    workspace: Workspace,
     userId: string,
     runId: string,
     reply: string,
   ): Promise<AgentRunWithEvents> {
-    const run = await this.deps.runs.getRun(workspaceId, userId, runId)
+    const run = await this.deps.runs.getRun(workspace.id, userId, runId)
     if (!run) throw AppError.notFound("Run not found")
     const clarification = run.clarification
     if (run.status !== "awaiting_input" || !clarification) {
@@ -300,19 +469,30 @@ export class AgentService {
     if (!clarification.allowFreeText && !clarification.options.includes(reply)) {
       throw AppError.validation("Choose one of the offered answers.", { options: clarification.options })
     }
-    if (!(await this.deps.runner.answer(runId, reply))) {
-      throw AppError.conflict(
-        "This question is not being answered in this backend process, so it cannot take an answer here.",
-        { status: run.status },
-      )
-    }
-    return this.get(workspaceId, userId, runId)
+    if (!(await this.deps.runner.answer(runId, reply)))
+      await this.resume(workspace, run, clarification, reply)
+    return this.get(workspace.id, userId, runId)
   }
 
-  /** Stops the model and any running query, and resolves once the cancellation is recorded. */
+  /**
+   * Stops the model and any running query, and resolves once the cancellation
+   * is recorded. A run that waits from before a restart has nothing running,
+   * so its cancellation is only recorded.
+   */
   async cancel(workspaceId: string, userId: string, runId: string): Promise<AgentRunWithEvents> {
+    const { runs, runner } = this.deps
     const run = await this.get(workspaceId, userId, runId)
-    if (await this.deps.runner.cancel(runId)) return this.get(workspaceId, userId, runId)
+    if (await runner.cancel(runId)) return this.get(workspaceId, userId, runId)
+    if (run.status === "awaiting_input") {
+      const checkpoint = await runs.checkpoint(workspaceId, runId)
+      const outcome: RunOutcome = { ...usedSoFar(run, checkpoint), status: "cancelled", error: null }
+      const stopWaiting = () => runs.finish(workspaceId, runId, outcome, true)
+      if (await this.eventsOf(workspaceId, runId).change(stopWaiting)) {
+        return this.get(workspaceId, userId, runId)
+      }
+      // Answered meanwhile: it goes on in this process now.
+      if (await runner.cancel(runId)) return this.get(workspaceId, userId, runId)
+    }
     throw AppError.conflict(
       ACTIVE_RUN_STATUSES.includes(run.status)
         ? "This question is not being answered in this backend process, so it cannot be cancelled here."
@@ -321,97 +501,263 @@ export class AgentService {
     )
   }
 
-  private async execute(workspace: Workspace, run: AgentRun, stop: AbortSignal): Promise<void> {
-    const { runs, runner, limits } = this.deps
-    const deadline = new RunDeadline(limits.runTimeoutMs, limits.answerTimeoutMs)
-    const signal = AbortSignal.any([stop, deadline.signal])
-    const events = new RunEvents(runs, runner.events, workspace.id, run.id)
-    const messages: ModelMessage[] = []
-    const progress: HarnessProgress = { steps: 0, usage: { inputTokens: 0, outputTokens: 0 } }
-
-    /** Pauses the run (and its clock) until the user answers the clarification. */
-    const askUser = async (request: Omit<Clarification, "id">): Promise<string> => {
-      const clarification: Clarification = { id: randomUUID(), ...request }
-      await runs.markAwaiting(workspace.id, run.id, clarification)
-      const answered = runner.waitForAnswer(run.id, signal, async (answer) => {
-        deadline.resume()
-        await runs.markResumed(workspace.id, run.id).catch((error: unknown) => {
-          console.error(`Could not record that agent run ${run.id} goes on`, error)
-        })
-        events.emit("clarification.answered", { id: clarification.id, answer })
-        await events.flush()
-      })
-      deadline.pause()
-      events.emit("clarification.requested", clarification)
-      return answered
-    }
-
-    let result:
-      | { status: "completed"; answer: AgentAnswer }
-      | { status: "failed"; error: RunError }
-      | { status: "cancelled" }
+  /** Records a queued run within the admission limits and starts answering it. */
+  private async queue(
+    workspace: Workspace,
+    input: Omit<NewRun, "workspaceId" | "provider" | "model">,
+  ): Promise<AgentRun> {
+    const { runs, provider } = this.deps
+    const slot = this.claim(workspace.id, input.userId, input.id, input.conversationId)
+    let run: AgentRun | null
     try {
-      if (!(await runs.markRunning(workspace.id, run.id))) return
-      events.emit("run.started", { provider: run.provider, model: run.model })
+      run = await runs.insertRun({
+        ...input,
+        workspaceId: workspace.id,
+        provider: provider.provider,
+        model: provider.model,
+      })
+    } catch (error) {
+      slot.release()
+      throw error
+    }
+    if (!run) {
+      slot.release()
+      throw AppError.notFound("Conversation not found")
+    }
+    const queued = run
+    slot.start((signal) => this.execute(workspace, queued, signal))
+    return queued
+  }
+
+  private claim(workspaceId: string, userId: string, runId: string, conversationId: string): AgentSlot {
+    const slot = this.deps.runner.claim({ runId, workspaceId, userId, conversationId })
+    if (!("busy" in slot)) return slot
+    if (slot.busy === "conversation") throw conversationBusy()
+    throw AppError.agentBusy(BUSY_MESSAGES[slot.busy], BUSY_RETRY_AFTER_SECONDS)
+  }
+
+  /** The run started with this mutation id; 409 when the id was used for another question. */
+  private async sentBefore(
+    workspaceId: string,
+    userId: string,
+    mutationId: string,
+    input: StartRunInput,
+  ): Promise<AgentRun | null> {
+    const run = await this.deps.runs.findByMutation(workspaceId, userId, mutationId)
+    const other =
+      run !== null &&
+      (run.question !== input.question ||
+        (input.conversationId !== undefined && input.conversationId !== run.conversationId))
+    if (other) throw mutationTaken()
+    return run
+  }
+
+  private eventsOf(workspaceId: string, runId: string): RunEvents {
+    return new RunEvents(this.deps.runs, this.deps.runner.events, workspaceId, runId)
+  }
+
+  private job(workspace: Workspace, run: AgentRun, events: RunEvents, runMs: number, stop: AbortSignal): Job {
+    const deadline = new RunDeadline(runMs, this.deps.limits.answerTimeoutMs)
+    return { workspace, run, events, deadline, signal: AbortSignal.any([stop, deadline.signal]) }
+  }
+
+  private execute(workspace: Workspace, run: AgentRun, stop: AbortSignal): Promise<void> {
+    const { runs, settings } = this.deps
+    const job = this.job(
+      workspace,
+      run,
+      this.eventsOf(workspace.id, run.id),
+      this.deps.limits.runTimeoutMs,
+      stop,
+    )
+    return this.drive(job, async () => {
+      const started = { provider: run.provider, model: run.model }
+      if (!(await job.events.change(() => runs.markRunning(workspace.id, run.id, started)))) return null
       const scope = run.connectionIds.length > 0 ? run.connectionIds : null
       const [context, description, prior, files] = await Promise.all([
         loadSourceContext(this.deps, workspace.id, scope),
-        this.deps.settings.get(workspace.id, "description"),
+        settings.get(workspace.id, "description"),
         runs.priorTurns(workspace.id, run.userId, run.conversationId, run.id, PRIOR_TURNS),
         runs.conversationAttachments(workspace.id, run.userId, run.conversationId, CONVERSATION_FILES),
       ])
-      const system = buildInstructions({
-        workspace: {
-          name: workspace.name,
-          description: typeof description?.value === "string" ? description.value : null,
-        },
-        sources: formatSourceContext(context),
-        today: new Date().toISOString().slice(0, 10),
-      })
-      messages.push(...priorMessages(prior), { role: "user", text: questionMessage(run, files) })
-      const answer = await runHarness(
-        {
-          provider: this.deps.provider,
-          system,
-          messages,
-          tools: this.deps.tools,
-          context: {
-            workspaceId: workspace.id,
-            userId: run.userId,
-            scope,
-            signal,
-            executions: new Map(),
-            attachments: files,
-            askUser,
+      return {
+        system: buildInstructions({
+          workspace: {
+            name: workspace.name,
+            description: typeof description?.value === "string" ? description.value : null,
           },
-          maxSteps: limits.maxSteps,
-          signal,
-          emit: events.emit,
-        },
-        progress,
+          sources: formatSourceContext(context),
+          today: new Date().toISOString().slice(0, 10),
+        }),
+        files,
+        messages: [...priorMessages(prior), { role: "user", text: questionMessage(run, files) }],
+        executions: new Map(),
+        progress: { steps: 0, usage: { inputTokens: 0, outputTokens: 0 } },
+      }
+    })
+  }
+
+  /**
+   * Goes on with a run that waits for the user but not in this process (it
+   * asked before a restart), from its stored checkpoint, with the answer.
+   */
+  private async resume(workspace: Workspace, run: AgentRun, clarification: Clarification, reply: string) {
+    const { runs, limits } = this.deps
+    const events = this.eventsOf(workspace.id, run.id)
+    const checkpoint = await runs.checkpoint(workspace.id, run.id)
+    if (Date.parse(clarification.expiresAt) <= Date.now()) {
+      const error = inputTimeout(limits.answerTimeoutMs)
+      const outcome: RunOutcome = { ...usedSoFar(run, checkpoint), status: "failed", error }
+      await events.change(() => runs.finish(workspace.id, run.id, outcome, true))
+      throw AppError.conflict(error.message, { status: "failed" })
+    }
+    if (!checkpoint) {
+      throw AppError.conflict(
+        "This question is not being answered in this backend process, so it cannot take an answer here.",
+        { status: run.status },
       )
-      result = { status: "completed", answer }
+    }
+    const slot = this.claim(workspace.id, run.userId, run.id, run.conversationId)
+    try {
+      const answered = { id: clarification.id, answer: reply }
+      if (!(await events.change(() => runs.markResumed(workspace.id, run.id, answered)))) {
+        throw AppError.conflict("This question is no longer waiting for an answer.")
+      }
     } catch (error) {
+      slot.release()
+      throw error
+    }
+    slot.start((signal) =>
+      this.drive(this.job(workspace, run, events, checkpoint.runMsLeft, signal), async () => {
+        const [files, records] = await Promise.all([
+          runs.conversationAttachments(workspace.id, run.userId, run.conversationId, CONVERSATION_FILES),
+          this.deps.executions.succeeded(workspace.id, checkpoint.executionIds),
+        ])
+        return {
+          system: checkpoint.system,
+          files,
+          messages: [...checkpoint.messages, answeredTurn(checkpoint.question, reply, events.emit)],
+          executions: new Map(
+            records.flatMap((record) =>
+              record.result ? [[record.id, runExecution({ ...record, result: record.result })] as const] : [],
+            ),
+          ),
+          progress: { steps: checkpoint.steps, usage: checkpoint.usage },
+        }
+      }),
+    )
+  }
+
+  /**
+   * Drives the model through the harness until it answers, waiting for the
+   * user whenever it asks, and records how the run ended. A shutdown leaves a
+   * waiting run waiting: it goes on from its checkpoint after the restart.
+   */
+  private async drive(job: Job, prepare: () => Promise<RunState | null>): Promise<void> {
+    const { workspace, run, events, deadline, signal } = job
+    let state: RunState | null = null
+    let waiting = false
+    let result: Result
+    try {
+      state = await prepare()
+      if (!state) return
+      for (;;) {
+        const outcome = await runHarness(
+          {
+            provider: this.deps.provider,
+            system: state.system,
+            messages: state.messages,
+            tools: this.deps.tools,
+            context: {
+              workspaceId: workspace.id,
+              userId: run.userId,
+              scope: run.connectionIds.length > 0 ? run.connectionIds : null,
+              signal,
+              executions: state.executions,
+              attachments: state.files,
+            },
+            maxSteps: this.deps.limits.maxSteps,
+            signal,
+            emit: events.emit,
+          },
+          state.progress,
+        )
+        if ("answer" in outcome) {
+          result = { status: "completed", answer: outcome.answer }
+          break
+        }
+        waiting = true
+        const answer = await this.waitForAnswer(job, state, outcome.question)
+        waiting = false
+        state.messages.push(answeredTurn(outcome.question, answer, events.emit))
+      }
+    } catch (error) {
+      if (waiting && signal.reason === "shutdown") return
       result = this.failure(run, error, signal)
     } finally {
       deadline.clear()
     }
-
-    if (result.status === "completed") events.emit("answer.completed", { answer: result.answer })
-    else if (result.status === "cancelled") events.emit("run.cancelled", {})
-    else events.emit("run.failed", result.error)
-    await events.flush()
     const outcome: RunOutcome = {
       status: result.status,
       answer: result.status === "completed" ? result.answer : null,
-      error: result.status === "failed" ? result.error : null,
-      usage: progress.usage,
-      steps: progress.steps,
-      transcript: storedTranscript(messages),
+      error: "error" in result ? result.error : null,
+      usage: state?.progress.usage ?? { inputTokens: 0, outputTokens: 0 },
+      steps: state?.progress.steps ?? 0,
+      transcript: storedTranscript(state?.messages ?? []),
     }
-    await runs.finish(workspace.id, run.id, outcome).catch((error: unknown) => {
-      console.error(`Could not record the outcome of agent run ${run.id}`, error)
-    })
+    await events
+      .change(() => this.deps.runs.finish(workspace.id, run.id, outcome))
+      .catch((error: unknown) => {
+        console.error(`Could not record the outcome of agent run ${run.id}`, error)
+      })
+  }
+
+  /**
+   * Records that the run waits for the user's answer, with a checkpoint to go
+   * on from after a restart, and pauses its clock. Resolves with the answer
+   * once it is recorded; rejects with the abort reason if the run stops first.
+   */
+  private async waitForAnswer(job: Job, state: RunState, question: PendingQuestion): Promise<string> {
+    const { workspace, run, events, deadline, signal } = job
+    const { runs, runner, limits } = this.deps
+    const clarification: Clarification = {
+      id: randomUUID(),
+      ...question.request,
+      expiresAt: new Date(Date.now() + limits.answerTimeoutMs).toISOString(),
+    }
+    const checkpoint: RunCheckpoint = {
+      system: state.system,
+      messages: state.messages,
+      question,
+      steps: state.progress.steps,
+      usage: state.progress.usage,
+      executionIds: [...state.executions.keys()],
+      runMsLeft: deadline.pause(),
+    }
+    // Listen before the question is recorded, so an answer sent right after it is taken.
+    const abandon = new AbortController()
+    const answered = runner.waitForAnswer(
+      run.id,
+      AbortSignal.any([signal, abandon.signal]),
+      async (answer) => {
+        deadline.resume()
+        await events
+          .change(() => runs.markResumed(workspace.id, run.id, { id: clarification.id, answer }))
+          .catch((error: unknown) =>
+            console.error(`Could not record the answer to agent run ${run.id}`, error),
+          )
+      },
+    )
+    try {
+      if (!(await events.change(() => runs.markAwaiting(workspace.id, run.id, clarification, checkpoint)))) {
+        throw new Error(`Agent run ${run.id} stopped running before it could ask its question`)
+      }
+    } catch (error) {
+      abandon.abort()
+      await answered.catch(() => {})
+      throw error
+    }
+    return answered
   }
 
   /** How a run ended, from which signal stopped it or what failed. */
@@ -419,7 +765,7 @@ export class AgentService {
     run: AgentRun,
     error: unknown,
     signal: AbortSignal,
-  ): { status: "failed"; error: RunError } | { status: "cancelled" } {
+  ): Exclude<Result, { status: "completed" }> {
     const failed = (code: string, message: string) => ({
       status: "failed" as const,
       error: { code, message },
@@ -433,17 +779,9 @@ export class AgentService {
         )
       }
       if (reason === "answer_timeout") {
-        return failed(
-          "AGENT_INPUT_TIMEOUT",
-          `No reply to the clarification arrived within ${duration(this.deps.limits.answerTimeoutMs)}, so the question was stopped. Ask it again.`,
-        )
+        return { status: "failed", error: inputTimeout(this.deps.limits.answerTimeoutMs) }
       }
-      if (reason === "shutdown") {
-        return failed(
-          "AGENT_INTERRUPTED",
-          "The backend stopped while this question was being answered. Ask it again.",
-        )
-      }
+      if (reason === "shutdown") return { status: "interrupted", error: INTERRUPTED }
       return { status: "cancelled" }
     }
     if (error instanceof RunFailure) return failed(error.code, error.message)
@@ -453,5 +791,12 @@ export class AgentService {
       "INTERNAL_ERROR",
       "The question could not be answered because of an unexpected error. Try again; if it keeps failing, check the backend logs.",
     )
+  }
+}
+
+function inputTimeout(answerTimeoutMs: number): RunError {
+  return {
+    code: "AGENT_INPUT_TIMEOUT",
+    message: `No reply to the clarification arrived within ${duration(answerTimeoutMs)}, so the question was stopped. Ask it again.`,
   }
 }

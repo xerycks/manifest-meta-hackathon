@@ -798,64 +798,63 @@ test(
   },
 )
 
-test("pinned evidence survives history pruning, and a restart fails interrupted runs", { skip }, async () => {
-  const run = await answered(owner, "Count again [evidence]")
-  const cited = run.answer?.evidence[0]?.executionId
-  assert.ok(cited)
-  const repository = new QueryExecutionsRepository(storage)
-  const error = { code: "QUERY_REJECTED", message: "Refused for the test.", reason: null, name: null }
-  for (let index = 0; index < KEPT_EXECUTIONS + 5; index += 1) {
-    await repository.insert(
-      {
-        id: randomUUID(),
-        workspaceId: acme.id,
-        connectionId: connection.id,
-        userId: null,
-        origin: "console",
-        query: { language: "sql", sql: "SELECT 1" },
-        limits: { maxRows: 10, timeoutMs: 1_000 },
-      },
-      { status: "rejected", error },
-    )
-  }
-  assert.ok(await repository.get(acme.id, connection.id, cited), "the cited execution is still stored")
+test(
+  "pinned evidence survives history pruning, and a restart interrupts runs left running",
+  { skip },
+  async () => {
+    const run = await answered(owner, "Count again [evidence]")
+    const cited = run.answer?.evidence[0]?.executionId
+    assert.ok(cited)
+    const repository = new QueryExecutionsRepository(storage)
+    const error = { code: "QUERY_REJECTED", message: "Refused for the test.", reason: null, name: null }
+    for (let index = 0; index < KEPT_EXECUTIONS + 5; index += 1) {
+      await repository.insert(
+        {
+          id: randomUUID(),
+          workspaceId: acme.id,
+          connectionId: connection.id,
+          userId: null,
+          origin: "console",
+          query: { language: "sql", sql: "SELECT 1" },
+          limits: { maxRows: 10, timeoutMs: 1_000 },
+        },
+        { status: "rejected", error },
+      )
+    }
+    assert.ok(await repository.get(acme.id, connection.id, cited), "the cited execution is still stored")
 
-  const runs = new AgentRunsRepository(storage)
-  const conversationId = randomUUID()
-  await runs.createConversation({
-    id: conversationId,
-    workspaceId: acme.id,
-    userId: ownerId,
-    title: "Interrupted",
-  })
-  const stranded = await runs.insertRun({
-    id: randomUUID(),
-    workspaceId: acme.id,
-    conversationId,
-    userId: ownerId,
-    question: "Interrupted?",
-    connectionIds: [],
-    provider: "scripted",
-    model: "test script",
-  })
-  assert.ok(stranded)
-  await runs.appendEvent(acme.id, stranded.id, {
-    seq: 1,
-    type: "run.started",
-    data: { provider: "scripted", model: "x" },
-  })
-  assert.ok((await runs.failInterrupted()) >= 1)
-  const after = await owner.call<Ok<AgentRunWithEvents>>(`${runsPath()}/${stranded.id}`)
-  assert.equal(after.body.result.status, "failed")
-  assert.equal(after.body.result.error?.code, "AGENT_INTERRUPTED")
-  assert.deepEqual(
-    after.body.result.events.map((event) => [event.seq, event.type]),
-    [
-      [1, "run.started"],
-      [2, "run.failed"],
-    ],
-  )
-})
+    const runs = new AgentRunsRepository(storage)
+    const stranded = await runs.insertRun({
+      id: randomUUID(),
+      workspaceId: acme.id,
+      conversationId: randomUUID(),
+      newConversation: { title: "Interrupted" },
+      userId: ownerId,
+      question: "Interrupted?",
+      connectionIds: [],
+      provider: "scripted",
+      model: "test script",
+    })
+    assert.ok(stranded)
+    assert.ok(await runs.markRunning(acme.id, stranded.id, { provider: "scripted", model: "x" }))
+    assert.ok((await runs.recoverAfterRestart()).interrupted >= 1)
+    const after = await owner.call<Ok<AgentRunWithEvents>>(`${runsPath()}/${stranded.id}`)
+    assert.equal(after.body.result.status, "interrupted")
+    assert.equal(after.body.result.error?.code, "AGENT_INTERRUPTED")
+    assert.equal(after.body.result.disposition, "retry")
+    assert.deepEqual(
+      after.body.result.events.map((event) => [event.seq, event.type]),
+      [
+        [1, "run.started"],
+        [2, "run.interrupted"],
+      ],
+    )
+    assert.equal(
+      after.body.result.events[1]?.type === "run.interrupted" && after.body.result.events[1].data.disposition,
+      "retry",
+    )
+  },
+)
 
 test(
   "shutting down aborts running questions, records them as interrupted, and leaves no work on the source",
@@ -865,8 +864,10 @@ test(
     await sleepingOnSource()
     await runners[0]?.shutdown()
     const run = await finished(owner, queued.id)
-    assert.equal(run.status, "failed")
+    assert.equal(run.status, "interrupted")
     assert.equal(run.error?.code, "AGENT_INTERRUPTED")
+    assert.equal(run.disposition, "retry")
+    assert.equal(run.events.at(-1)?.type, "run.interrupted")
     await noBusySessions()
   },
 )

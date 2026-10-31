@@ -166,6 +166,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
             manifests: manifestsRepository,
             knowledge,
             settings,
+            executions,
             tools: createAgentTools({
               connections: connectionsRepository,
               manifests: manifestsRepository,

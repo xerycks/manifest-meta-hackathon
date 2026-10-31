@@ -192,6 +192,16 @@ export class QueryExecutionsRepository {
     return firstRecord(rows)
   }
 
+  /** The executions among `ids` that succeeded, with their stored results. */
+  async succeeded(workspaceId: string, ids: string[]): Promise<ExecutionRecord[]> {
+    const { rows } = await this.pool.query<ExecutionRow>(
+      `SELECT ${RECORD_COLUMNS} FROM query_executions
+        WHERE workspace_id = $1 AND id = ANY ($2::uuid[]) AND status = 'succeeded'`,
+      [workspaceId, ids],
+    )
+    return rows.map(toRecord)
+  }
+
   /**
    * Keeps succeeded executions out of history pruning, e.g. because an answer
    * cites them. Returns the ids that are now pinned.

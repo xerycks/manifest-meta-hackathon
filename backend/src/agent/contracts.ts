@@ -19,6 +19,11 @@ export const AGENT_LIMITS = {
   clarificationOptions: 6,
   optionChars: 100,
   answerReplyChars: 2_000,
+  /** Conversations one page of the list returns, by default and at most. */
+  conversationPage: 20,
+  conversationPageMax: 50,
+  /** Runs a conversation read returns, the latest ones before the cursor. */
+  conversationRuns: 50,
 } as const
 
 /** Files a question may carry: a few small UTF-8 text files the model reads with read_attachment. */
@@ -39,8 +44,9 @@ export const ATTACHMENT_TYPES = {
 
 export type AttachmentMediaType = (typeof ATTACHMENT_TYPES)[keyof typeof ATTACHMENT_TYPES]
 
-/** Cycle 12 adds interrupted. */
-export type RunStatus = "queued" | "running" | "awaiting_input" | "completed" | "failed" | "cancelled"
+/** interrupted: a restart stopped the run; its disposition says how to recover it. */
+export type RunStatus =
+  "queued" | "running" | "awaiting_input" | "completed" | "failed" | "cancelled" | "interrupted"
 
 export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "awaiting_input"]
 
@@ -53,6 +59,19 @@ export type AgentToolName =
   | "read_attachment"
   | "ask_user"
   | "submit_answer"
+
+/**
+ * How an interrupted run is recovered. retry: it only read, so asking again
+ * (POST /runs/:runId/retry) is safe. reconcile: it started a tool with effects
+ * outside the run, whose outcome must be checked before anything is repeated.
+ */
+export type RecoveryDisposition = "retry" | "reconcile"
+
+/**
+ * Tools whose calls change something outside the run. Every tool so far only
+ * reads; a run interrupted after starting one of these must be reconciled.
+ */
+export const TOOLS_WITH_EFFECTS: readonly AgentToolName[] = []
 
 /** A query result an answer cites, with the first rows of its result. */
 export interface EvidenceItem {
@@ -97,7 +116,12 @@ export interface Clarification {
   options: string[]
   /** False: the answer must be one of the options. */
   allowFreeText: boolean
+  /** When the run stops waiting (AGENT_INPUT_TIMEOUT). */
+  expiresAt: string
 }
+
+/** What the model asks the user with ask_user. */
+export type ClarificationRequest = Pick<Clarification, "question" | "options" | "allowFreeText">
 
 /** A file sent with a question, without its content. */
 export interface AttachmentSummary {
@@ -130,6 +154,10 @@ export interface AgentRun {
   /** What the run is waiting on while awaiting_input; null otherwise. */
   clarification: Clarification | null
   attachments: AttachmentSummary[]
+  /** Set when interrupted: how to recover the run. */
+  disposition: RecoveryDisposition | null
+  /** The interrupted run this one retries. */
+  retryOf: string | null
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -155,6 +183,8 @@ export interface RunEventData {
   "clarification.answered": { id: string; answer: string }
   "run.failed": RunError
   "run.cancelled": Record<string, never>
+  /** A restart stopped the run (status interrupted). */
+  "run.interrupted": RunError & { disposition: RecoveryDisposition }
 }
 
 export type RunEventType = keyof RunEventData
@@ -169,6 +199,7 @@ export const TERMINAL_EVENT_TYPES: readonly RunEventType[] = [
   "answer.completed",
   "run.failed",
   "run.cancelled",
+  "run.interrupted",
 ]
 
 export interface AgentRunWithEvents extends AgentRun {
@@ -182,9 +213,30 @@ export interface Conversation {
   updatedAt: string
 }
 
-/** A conversation with its latest runs, oldest first. Finished runs leave out their answer.delta events. */
+/** A conversation in the list, with how its latest question stands. */
+export interface ConversationSummary extends Conversation {
+  /** The latest question's status; null for a conversation without questions. */
+  status: RunStatus | null
+  /** The latest question waits for the user's answer to a clarification. */
+  pendingClarification: boolean
+}
+
+/** One page of the user's conversations, newest activity first. */
+export interface ConversationPage {
+  conversations: ConversationSummary[]
+  /** Pass as ?cursor= for the next page; null on the last one. */
+  nextCursor: string | null
+}
+
+/**
+ * A conversation with its latest runs (before ?before= when given), oldest
+ * first. Finished runs leave out their answer.delta events: their answer or
+ * error supersedes the text streamed while working.
+ */
 export interface ConversationWithRuns extends Conversation {
   runs: AgentRunWithEvents[]
+  /** Older runs exist: read them with ?before=<the first run's id>. */
+  hasEarlier: boolean
 }
 
 // Requests ------------------------------------------------------------------
@@ -232,6 +284,11 @@ export const startRunSchema = z.strictObject({
     .array(attachmentInputSchema)
     .max(ATTACHMENT_LIMITS.perRun, `Attach at most ${ATTACHMENT_LIMITS.perRun} files`)
     .optional(),
+  /**
+   * Chosen by the client for each question, unique per user: sending the same
+   * one again (after a network failure) returns the run it already started.
+   */
+  mutationId: z.uuid().optional(),
 })
 
 export type StartRunInput = z.infer<typeof startRunSchema>
@@ -251,6 +308,69 @@ export const answerRunSchema = z.strictObject({
 export type AnswerRunInput = z.infer<typeof answerRunSchema>
 
 export const conversationParamsSchema = agentParamsSchema.extend({ conversationId: z.uuid() })
+
+/** Where a page of the conversation list starts: after this activity time and id. */
+export interface ConversationCursor {
+  /** updated_at in UTC with microseconds, so no conversation is skipped or repeated. */
+  activity: string
+  id: string
+}
+
+const cursorSchema = z.tuple([z.iso.datetime({ precision: 6 }), z.uuid()])
+
+export function encodeCursor(cursor: ConversationCursor): string {
+  return Buffer.from(JSON.stringify([cursor.activity, cursor.id])).toString("base64url")
+}
+
+function decodeCursor(text: string): ConversationCursor | null {
+  try {
+    const parsed = cursorSchema.safeParse(JSON.parse(Buffer.from(text, "base64url").toString("utf8")))
+    return parsed.success ? { activity: parsed.data[0], id: parsed.data[1] } : null
+  } catch {
+    return null
+  }
+}
+
+export const listConversationsQuerySchema = z.strictObject({
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(AGENT_LIMITS.conversationPageMax)
+    .default(AGENT_LIMITS.conversationPage),
+  cursor: z
+    .string()
+    .max(200)
+    .transform((text, context) => {
+      const cursor = decodeCursor(text)
+      if (!cursor) {
+        context.addIssue({ code: "custom", message: "Not a cursor this list returned" })
+        return z.NEVER
+      }
+      return cursor
+    })
+    .optional(),
+})
+
+export type ListConversationsQuery = z.infer<typeof listConversationsQuerySchema>
+
+export const conversationQuerySchema = z.strictObject({
+  /** Only runs older than this run of the conversation. */
+  before: z.uuid().optional(),
+})
+
+export type ConversationQuery = z.infer<typeof conversationQuerySchema>
+
+export const renameConversationSchema = z.strictObject({
+  title: z
+    .string()
+    .trim()
+    .min(1, "Give the conversation a title")
+    .max(AGENT_LIMITS.titleChars, `A title can be at most ${AGENT_LIMITS.titleChars} characters`)
+    .refine(noNul, "A title cannot contain NUL characters"),
+})
+
+export type RenameConversationInput = z.infer<typeof renameConversationSchema>
 
 export const runEventsQuerySchema = z.strictObject({
   /** Only events with a higher sequence number. */
