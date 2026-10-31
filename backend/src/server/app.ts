@@ -25,6 +25,7 @@ import { CredentialSealer } from "../connections/credentials.js"
 import { ConnectionsRepository } from "../connections/repository.js"
 import { connectionsRouter, type ConnectionsDeps } from "../connections/routes.js"
 import { ConnectionsService } from "../connections/service.js"
+import { DashboardRefresher } from "../dashboards/refresh.js"
 import { DashboardsRepository } from "../dashboards/repository.js"
 import { dashboardsRouter, type DashboardsDeps } from "../dashboards/routes.js"
 import { DashboardsService } from "../dashboards/service.js"
@@ -70,6 +71,8 @@ export interface AppDeps {
   queries?: QueryRunner
   /** Questions being answered; pass it in to abort them on shutdown. */
   agents?: AgentRunner
+  /** Dashboard refreshes; pass it in to stop them on shutdown (or to tune their retries in tests). */
+  dashboardRefreshes?: DashboardRefresher
   /** Replaces the provider configured by AGENT_PROVIDER (null: none, so agent routes answer 503). */
   modelProvider?: ModelProvider | null
   /** Heartbeat interval of agent event streams (15 s by default); shorter in tests. */
@@ -163,21 +166,17 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
     const provider = deps.modelProvider !== undefined ? deps.modelProvider : createModelProvider(env)
     const runs = new AgentRunsRepository(pool)
     const savedQueriesRepository = new SavedQueriesRepository(pool)
-    savedQueriesDeps = {
-      workspaces,
-      auth,
-      sessionSecret,
-      savedQueries: executor
-        ? new SavedQueriesService({
-            savedQueries: savedQueriesRepository,
-            executions,
-            executor,
-            settings,
-            runs,
-          })
-        : null,
-    }
-    // Dashboards show stored results, so they work without the key; running a panel's query needs it.
+    const savedQueries = executor
+      ? new SavedQueriesService({
+          savedQueries: savedQueriesRepository,
+          executions,
+          executor,
+          settings,
+          runs,
+        })
+      : null
+    savedQueriesDeps = { workspaces, auth, sessionSecret, savedQueries }
+    // Dashboards show stored results, so they work without the key; refreshing panels needs it.
     dashboardsDeps = {
       workspaces,
       auth,
@@ -186,6 +185,9 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
         dashboards: new DashboardsRepository(pool),
         savedQueries: savedQueriesRepository,
         executions,
+        refreshes: savedQueries
+          ? { refresher: deps.dashboardRefreshes ?? new DashboardRefresher(), runs: savedQueries }
+          : null,
       }),
     }
     agentDeps = {

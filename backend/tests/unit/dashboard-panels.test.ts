@@ -187,3 +187,177 @@ test("panels carry only the columns and rows they show", () => {
   assert.equal(cut.result.rows.length, 3)
   assert.equal(cut.partialResult, true)
 })
+
+test("chart configs are checked per kind and fill their defaults", () => {
+  const chart = (kind: string, config: Record<string, unknown>) =>
+    issues({ kind, savedQueryId: SAVED_QUERY, config })
+
+  assert.deepEqual(
+    panelInputSchema.parse({
+      kind: "bar",
+      savedQueryId: SAVED_QUERY,
+      config: { xColumn: "status", yColumns: ["revenue"], currency: "USD" },
+    }).config,
+    {
+      xColumn: "status",
+      yColumns: ["revenue"],
+      stacked: false,
+      sort: "none",
+      xFormat: "auto",
+      format: "number",
+      decimals: null,
+      currency: null,
+    },
+  )
+  const series = { xColumn: "status", yColumns: ["revenue", "last_month"] }
+  assert.deepEqual(chart("bar", { ...series, stacked: true, sort: "value_desc", decimals: 2 }), [])
+  assert.match(
+    chart("bar", { xColumn: "status", yColumns: [] }).join(),
+    /^config\.yColumns: Choose at least one/,
+  )
+  assert.match(
+    chart("bar", { xColumn: "status", yColumns: ["a", "b", "c", "d", "e", "f"] }).join(),
+    /at most 5 columns of values/,
+  )
+  assert.deepEqual(chart("bar", { xColumn: "status", yColumns: ["revenue", "revenue"] }), [
+    "config.yColumns: Choose each column once",
+  ])
+  assert.deepEqual(chart("bar", { xColumn: "status", yColumns: ["status"] }), [
+    "config.yColumns: Plot columns other than the x column",
+  ])
+  assert.deepEqual(chart("bar", { ...series, format: "currency" }), ["config.currency: Choose the currency"])
+  assert.match(chart("bar", { ...series, xFormat: "week" }).join(), /^config\.xFormat: /)
+  assert.deepEqual(chart("line", { ...series, sort: "x", stacked: true }), [])
+  assert.deepEqual(chart("line", { ...series, sort: "value_desc" }), [
+    "config.sort: Keep a line in result order or order it by the x column",
+  ])
+
+  assert.deepEqual(
+    panelInputSchema.parse({
+      kind: "gauge",
+      savedQueryId: SAVED_QUERY,
+      config: { valueColumn: "rate", max: 1 },
+    }).config,
+    { valueColumn: "rate", min: 0, max: 1, thresholds: [], format: "number", decimals: null, currency: null },
+  )
+  const gauge = (config: Record<string, unknown>) =>
+    chart("gauge", { valueColumn: "rate", max: 100, ...config })
+  assert.deepEqual(
+    gauge({
+      thresholds: [
+        { value: 50, status: "warning" },
+        { value: 80, status: "critical" },
+      ],
+    }),
+    [],
+  )
+  assert.deepEqual(gauge({ min: 100 }), ["config.max: The maximum must be above the minimum"])
+  assert.match(chart("gauge", { valueColumn: "rate" }).join(), /^config\.max: /)
+  assert.deepEqual(gauge({ thresholds: [{ value: 120, status: "good" }] }), [
+    "config.thresholds.0.value: A threshold must lie between the minimum and the maximum",
+  ])
+  assert.deepEqual(
+    gauge({
+      thresholds: [
+        { value: 60, status: "good" },
+        { value: 60, status: "warning" },
+      ],
+    }),
+    ["config.thresholds.1.value: List thresholds from the lowest to the highest, each once"],
+  )
+  assert.match(
+    gauge({ thresholds: [{ value: 10, status: "fine" }] }).join(),
+    /^config\.thresholds\.0\.status: /,
+  )
+  assert.match(gauge({ max: 1e16 }).join(), /^config\.max: Use a smaller number/)
+
+  const ticker = (config: Record<string, unknown>) =>
+    chart("ticker", { labelColumn: "status", valueColumn: "revenue", ...config })
+  assert.deepEqual(ticker({ deltaColumn: "last_month", format: "currency", currency: "EUR" }), [])
+  assert.deepEqual(ticker({ valueColumn: "status" }), [
+    "config.valueColumn: Use a different column for the labels",
+  ])
+  assert.deepEqual(ticker({ deltaColumn: "revenue" }), [
+    "config.deltaColumn: Use a different column for the change",
+  ])
+
+  const flows = { sourceColumn: "channel", targetColumn: "status", valueColumn: "orders" }
+  assert.deepEqual(chart("sankey", flows), [])
+  assert.deepEqual(chart("sankey", { ...flows, targetColumn: "channel" }), [
+    "config.targetColumn: Use a different column for the targets",
+  ])
+  assert.deepEqual(chart("sankey", { ...flows, valueColumn: "status" }), [
+    "config.valueColumn: Use a different column for the values",
+  ])
+  assert.match(chart("sankey", { ...flows, format: "number" }).join(), /^config: Unrecognized key/)
+})
+
+test("chart columns must be in the latest result, and the ones carrying values must hold numbers", () => {
+  const parse = (kind: string, config: Record<string, unknown>) =>
+    panelInputSchema.parse({ kind, savedQueryId: SAVED_QUERY, config })
+  assert.equal(
+    columnProblem(parse("bar", { xColumn: "status", yColumns: ["revenue", "orders"] }), columns),
+    null,
+  )
+  assert.deepEqual(
+    columnProblem(parse("line", { xColumn: "status", yColumns: ["orders", "status2"] }), columns),
+    {
+      field: "config.yColumns.1",
+      column: "status2",
+      message:
+        "The latest result has no column “status2”. Its columns are: status, orders, revenue, last_month.",
+    },
+  )
+  assert.equal(
+    columnProblem(parse("bar", { xColumn: "revenue", yColumns: ["status"] }), columns)?.message,
+    "“status” holds text values; a bar chart needs a column of numbers.",
+  )
+  assert.equal(
+    columnProblem(parse("gauge", { valueColumn: "status", max: 10 }), columns)?.field,
+    "config.valueColumn",
+  )
+  assert.equal(
+    columnProblem(
+      parse("ticker", { labelColumn: "status", valueColumn: "revenue", deltaColumn: "status2" }),
+      columns,
+    )?.field,
+    "config.deltaColumn",
+  )
+  assert.equal(
+    columnProblem(
+      parse("sankey", { sourceColumn: "orders", targetColumn: "revenue", valueColumn: "status" }),
+      columns,
+    )?.message,
+    "“status” holds text values; a Sankey diagram needs a column of numbers.",
+  )
+})
+
+test("charts carry up to 1,000 rows of their columns, tickers 50, and gauges the first row", () => {
+  const many = Array.from({ length: 1_200 }, (_value, index) => [`s${index}`, index, `${index}.50`, null])
+  const bar = panelInputSchema.parse({
+    kind: "bar",
+    savedQueryId: SAVED_QUERY,
+    config: { xColumn: "status", yColumns: ["revenue"] },
+  })
+  const shown = panelResult(bar, result(many))
+  assert.deepEqual(shown.result.columns, [columns[0], columns[2]])
+  assert.equal(shown.result.rows.length, DASHBOARD_LIMITS.chartRows)
+  assert.deepEqual(shown.result.rows[1], ["s1", "1.50"])
+  assert.equal(shown.partialResult, true)
+
+  const ticker = panelInputSchema.parse({
+    kind: "ticker",
+    savedQueryId: SAVED_QUERY,
+    config: { labelColumn: "status", valueColumn: "orders", deltaColumn: "last_month" },
+  })
+  const items = panelResult(ticker, result(many)).result
+  assert.equal(items.rows.length, DASHBOARD_LIMITS.tickerRows)
+  assert.deepEqual(items.rows[0], ["s0", 0, null])
+
+  const gauge = panelInputSchema.parse({
+    kind: "gauge",
+    savedQueryId: SAVED_QUERY,
+    config: { valueColumn: "revenue", max: 2000 },
+  })
+  assert.deepEqual(panelResult(gauge, result(many)).result.rows, [["0.50"]])
+})

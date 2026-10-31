@@ -137,6 +137,26 @@ interface PreviewRow {
   stored_rows: number
 }
 
+/** A saved query's latest run, and when its latest result ran. */
+export interface LatestRun {
+  lastSuccessAt: string | null
+  latest: {
+    status: ExecutionStatus
+    error: ExecutionError | null
+    createdAt: string
+    finishedAt: string | null
+  } | null
+}
+
+interface LatestRunRow {
+  saved_query_id: string
+  last_success_at: Date | null
+  status: ExecutionStatus | null
+  error: ExecutionError | null
+  created_at: Date | null
+  finished_at: Date | null
+}
+
 /** Execution records; every query is scoped by workspace_id. */
 export class QueryExecutionsRepository {
   constructor(private readonly pool: Pool) {}
@@ -270,6 +290,43 @@ export class QueryExecutionsRepository {
         durationMs: row.duration_ms ?? 0,
       },
     }))
+  }
+
+  /**
+   * For each of the saved queries, its latest run (any status) and when its
+   * latest result (the run it keeps pinned) ran: what a dashboard refresh reports.
+   */
+  async latestForSavedQueries(workspaceId: string, savedQueryIds: string[]): Promise<Map<string, LatestRun>> {
+    if (savedQueryIds.length === 0) return new Map()
+    const { rows } = await this.pool.query<LatestRunRow>(
+      `SELECT s.id AS saved_query_id, ok.created_at AS last_success_at,
+              l.status, l.error, l.created_at, l.finished_at
+         FROM saved_queries s
+         LEFT JOIN query_executions ok ON ok.workspace_id = s.workspace_id AND ok.id = s.last_execution_id
+         LEFT JOIN LATERAL (
+           SELECT e.status, e.error, e.created_at, e.finished_at FROM query_executions e
+            WHERE e.workspace_id = s.workspace_id AND e.saved_query_id = s.id
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT 1) l ON true
+        WHERE s.workspace_id = $1 AND s.id = ANY ($2::uuid[])`,
+      [workspaceId, savedQueryIds],
+    )
+    return new Map(
+      rows.map((row) => [
+        row.saved_query_id,
+        {
+          lastSuccessAt: row.last_success_at?.toISOString() ?? null,
+          latest: row.status
+            ? {
+                status: row.status,
+                error: row.error,
+                createdAt: (row.created_at as Date).toISOString(),
+                finishedAt: row.finished_at?.toISOString() ?? null,
+              }
+            : null,
+        },
+      ]),
+    )
   }
 
   /**

@@ -226,7 +226,8 @@ test(
         decimals: 2,
       },
     })
-    assert.equal(number.position, 0)
+    // New panels go below the others at their kind's default size.
+    assert.deepEqual(number.layout, { x: 0, y: 0, w: 3, h: 2 })
     assert.equal(number.version, 1)
     assert.deepEqual(number.config, {
       valueColumn: "revenue",
@@ -264,7 +265,7 @@ test(
       savedQueryId: byStatus.id,
       config: { columns: ["revenue", "status"] },
     })
-    assert.equal(table.position, 1)
+    assert.deepEqual(table.layout, { x: 0, y: 2, w: 12, h: 4 })
     assert.equal(table.title, "")
     assert.deepEqual(
       available(table.data).latestRun?.result.rows,
@@ -287,12 +288,12 @@ test(
 
     const shown = await dashboard(owner, created.id)
     assert.deepEqual(
-      shown.panels.map((panel) => [panel.id, panel.kind, panel.position]),
+      shown.panels.map((panel) => [panel.id, panel.kind, panel.layout]),
       [
-        [number.id, "number", 0],
-        [table.id, "table", 1],
-        [notes.id, "markdown", 2],
-        [waiting.id, "table", 3],
+        [number.id, "number", { x: 0, y: 0, w: 3, h: 2 }],
+        [table.id, "table", { x: 0, y: 2, w: 12, h: 4 }],
+        [notes.id, "markdown", { x: 0, y: 6, w: 4, h: 2 }],
+        [waiting.id, "table", { x: 0, y: 8, w: 12, h: 4 }],
       ],
     )
     assert.deepEqual(shown.panels[0], number)
@@ -324,27 +325,77 @@ test(
     assert.equal(ran.latestRun?.createdAt, run.execution.createdAt)
     assert.deepEqual(ran.latestRun?.result.rows, run.execution.result?.rows)
 
-    // Reorder: the full list of panels, each once.
-    const order = [waiting.id, notes.id, number.id, table.id]
-    const moved = await owner.call<Ok<DashboardDetail>>(`${panelsPath(created.id)}/order`, {
+    // The layout is saved whole and orders the panels top to bottom, then left to right.
+    const layoutPath = `${dashboardsPath(created.id)}/layout`
+    const boxes = [
+      { panelId: number.id, x: 0, y: 0, w: 3, h: 2 },
+      { panelId: notes.id, x: 3, y: 0, w: 9, h: 2 },
+      { panelId: waiting.id, x: 0, y: 2, w: 6, h: 4 },
+      { panelId: table.id, x: 6, y: 2, w: 6, h: 4 },
+    ]
+    const laidOut = await owner.call<Ok<DashboardDetail>>(layoutPath, {
       method: "PUT",
-      json: { panelIds: order },
+      json: { version: shown.layoutVersion, boxes },
     })
-    assert.equal(moved.status, 200, moved.text)
+    assert.equal(laidOut.status, 200, laidOut.text)
+    assert.equal(laidOut.body.result.layoutVersion, shown.layoutVersion + 1)
+    assert.equal(laidOut.body.result.version, shown.version)
+    const order = [number.id, notes.id, waiting.id, table.id]
     assert.deepEqual(
-      moved.body.result.panels.map((panel) => [panel.id, panel.position]),
-      order.map((id, index) => [id, index]),
+      laidOut.body.result.panels.map((panel) => [panel.id, panel.layout]),
+      order.map((id) => {
+        const { panelId: _panelId, ...layout } = boxes.find((item) => item.panelId === id) ?? {}
+        return [id, layout]
+      }),
     )
-    const outdated = await owner.call<Failure>(`${panelsPath(created.id)}/order`, {
+    const outdated = await owner.call<Failure>(layoutPath, {
       method: "PUT",
-      json: { panelIds: [number.id, table.id, notes.id] },
+      json: { version: shown.layoutVersion, boxes },
     })
     assert.equal(outdated.status, 409, outdated.text)
-    const current = outdated.body.error.details?.current as DashboardDetail
     assert.deepEqual(
-      current.panels.map((panel) => panel.id),
+      (outdated.body.error.details?.current as DashboardDetail).panels.map((panel) => panel.id),
       order,
     )
+    const version = laidOut.body.result.layoutVersion
+    const missing = await owner.call<Failure>(layoutPath, {
+      method: "PUT",
+      json: { version, boxes: boxes.slice(1) },
+    })
+    assert.equal(missing.status, 409, missing.text)
+    const overlapping = await owner.call<Failure>(layoutPath, {
+      method: "PUT",
+      json: { version, boxes: boxes.map((item) => (item.panelId === table.id ? { ...item, x: 5 } : item)) },
+    })
+    assert.equal(overlapping.status, 422, overlapping.text)
+    assert.equal(overlapping.body.error.message, "Panels cannot overlap.")
+    const cramped = await owner.call<Failure>(layoutPath, {
+      method: "PUT",
+      json: { version, boxes: boxes.map((item) => (item.panelId === table.id ? { ...item, h: 2 } : item)) },
+    })
+    assert.equal(cramped.status, 422, cramped.text)
+    assert.deepEqual(cramped.body.error.details, { field: "boxes", panelId: table.id })
+    const offGrid = await owner.call<Failure>(layoutPath, {
+      method: "PUT",
+      json: { version, boxes: boxes.map((item) => (item.panelId === table.id ? { ...item, x: 7 } : item)) },
+    })
+    assert.equal(offGrid.status, 422, offGrid.text)
+    assert.match(offGrid.body.error.message, /fit within the 12 columns/)
+    // A fresh backend serves the saved layout.
+    const again = await startApp(
+      createApp(env, { pool: storage, sources, refreshes, queries, modelProvider: null }),
+    )
+    try {
+      assert.deepEqual(
+        (await dashboard(owner.at(again.baseUrl), created.id)).panels.map((panel) => [
+          panel.id,
+          panel.layout,
+        ]),
+        laidOut.body.result.panels.map((panel) => [panel.id, panel.layout]),
+      )
+    } finally {
+      await again.close()
+    }
 
     // Panel edits name the version they started from.
     const edited = await owner.call<Ok<DashboardPanel>>(panelsPath(created.id, table.id), {
@@ -382,7 +433,7 @@ test(
     assert.equal((await owner.call(panelsPath(created.id, table.id), { method: "DELETE" })).status, 404)
     assert.deepEqual(
       (await dashboard(owner, created.id)).panels.map((panel) => panel.id),
-      [waiting.id, notes.id, number.id],
+      [number.id, notes.id, waiting.id],
     )
 
     // Renaming needs the current version; a stale save gets the current dashboard.
@@ -530,7 +581,10 @@ test(
       addPanel(bob, shared.id, { kind: "markdown", config: { body: "Bob was here" } }),
       bob.call(panelsPath(shared.id, note.id), { method: "PATCH", json: { version: 1, title: "x" } }),
       bob.call(panelsPath(shared.id, note.id), { method: "DELETE" }),
-      bob.call(`${panelsPath(shared.id)}/order`, { method: "PUT", json: { panelIds: [note.id] } }),
+      bob.call(`${dashboardsPath(shared.id)}/layout`, {
+        method: "PUT",
+        json: { version: 1, boxes: [{ panelId: note.id, x: 2, y: 0, w: 4, h: 2 }] },
+      }),
     ]
     for (const res of await Promise.all(forbidden)) assert.equal(res.status, 403, res.text)
     // An admin may.

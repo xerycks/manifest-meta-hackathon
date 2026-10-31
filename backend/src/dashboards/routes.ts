@@ -13,13 +13,15 @@ import {
   dashboardParamsSchema,
   panelInputSchema,
   panelParamsSchema,
-  reorderPanelsSchema,
+  refreshSchema,
+  saveLayoutSchema,
   updateDashboardSchema,
   updatePanelSchema,
   workspaceParamsSchema,
   type CreateDashboardInput,
   type PanelInput,
-  type ReorderPanelsInput,
+  type RefreshInput,
+  type SaveLayoutInput,
   type UpdateDashboardInput,
   type UpdatePanelInput,
 } from "./schemas.js"
@@ -45,9 +47,10 @@ function actor(req: Request): Actor {
 /**
  * Dashboards for any member. Workspace-visible ones are everyone's to view;
  * private ones only their creator's (others, owners and admins included, get
- * 404). The creator or an owner or admin edits a dashboard and its panels.
- * They read application storage only; running a panel's saved query goes
- * through the saved-query routes.
+ * 404). The creator or an owner or admin edits a dashboard, its panels, and
+ * its layout. Reads use application storage only; anyone who can view a
+ * dashboard may refresh it (or cancel its refresh), which runs the panels'
+ * saved queries as them and needs CONNECTION_ENCRYPTION_KEY (503 otherwise).
  */
 export function dashboardsRouter(deps: DashboardsDeps | null): Router {
   const router = Router()
@@ -55,6 +58,7 @@ export function dashboardsRouter(deps: DashboardsDeps | null): Router {
   const item = `${collection}/:dashboardId`
   const panels = `${item}/panels`
   const panel = `${panels}/:panelId`
+  const refresh = `${item}/refresh`
 
   if (!deps) {
     router.use(collection, (_req, _res, next) => next(AppError.storageNotConfigured()))
@@ -142,17 +146,70 @@ export function dashboardsRouter(deps: DashboardsDeps | null): Router {
   )
 
   router.put(
-    `${panels}/order`,
+    `${item}/layout`,
     auth,
     csrf,
     validate("params", dashboardParamsSchema),
     member,
-    validate("body", reorderPanelsSchema),
+    validate("body", saveLayoutSchema),
     asyncHandler(async (req, res) => {
-      const { panelIds } = req.body as ReorderPanelsInput
+      const input = req.body as SaveLayoutInput
       ok(
         res,
-        await service.reorder(currentWorkspace(req).id, param(req, "dashboardId"), panelIds, actor(req)),
+        await service.saveLayout(currentWorkspace(req).id, param(req, "dashboardId"), input, actor(req)),
+      )
+    }),
+  )
+
+  router.get(
+    refresh,
+    auth,
+    validate("params", dashboardParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      ok(
+        res,
+        await service.refreshProgress(
+          currentWorkspace(req).id,
+          param(req, "dashboardId"),
+          currentUser(req).id,
+        ),
+      )
+    }),
+  )
+
+  router.post(
+    refresh,
+    auth,
+    csrf,
+    validate("params", dashboardParamsSchema),
+    member,
+    validate("body", refreshSchema),
+    asyncHandler(async (req, res) => {
+      const { panelIds } = req.body as RefreshInput
+      ok(
+        res,
+        await service.refresh(
+          currentWorkspace(req).id,
+          param(req, "dashboardId"),
+          currentUser(req).id,
+          panelIds,
+        ),
+        202,
+      )
+    }),
+  )
+
+  router.delete(
+    refresh,
+    auth,
+    csrf,
+    validate("params", dashboardParamsSchema),
+    member,
+    asyncHandler(async (req, res) => {
+      ok(
+        res,
+        await service.cancelRefresh(currentWorkspace(req).id, param(req, "dashboardId"), currentUser(req).id),
       )
     }),
   )

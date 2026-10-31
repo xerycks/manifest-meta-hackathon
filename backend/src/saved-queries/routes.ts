@@ -150,13 +150,9 @@ export function savedQueriesRouter(deps: SavedQueriesDeps | null): Router {
       })
       ok(
         res,
-        await service.run(
-          currentWorkspace(req).id,
-          currentUser(req).id,
-          savedQueryId(req),
-          parameters,
-          disconnected.signal,
-        ),
+        await service.run(currentWorkspace(req).id, currentUser(req).id, savedQueryId(req), parameters, {
+          signal: disconnected.signal,
+        }),
       )
     }),
   )

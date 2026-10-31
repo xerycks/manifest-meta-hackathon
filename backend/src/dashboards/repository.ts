@@ -5,10 +5,12 @@ import type { Engine } from "../connections/schemas.js"
 import type { ParameterDefinition } from "../saved-queries/schemas.js"
 import { versionedOutcome, type VersionedSave } from "../shared/postgres/versioned.js"
 import { plainText, snippet } from "../shared/text.js"
+import { bottom, fitKind, layoutProblem, PANEL_SIZES, type PlacedBox } from "./layout.js"
 import {
   DASHBOARD_LIMITS,
   type Dashboard,
   type DashboardList,
+  type PanelBox,
   type PanelConfig,
   type PanelDefinition,
   type PanelKind,
@@ -22,6 +24,7 @@ interface DashboardRow {
   description: string
   visibility: Visibility
   version: number
+  layout_version: number
   panel_count: number
   created_by: string | null
   created_by_name: string | null
@@ -37,7 +40,10 @@ interface PanelRow {
   title: string
   saved_query_id: string | null
   config: PanelConfig
-  position: number
+  grid_x: number
+  grid_y: number
+  grid_w: number
+  grid_h: number
   version: number
   created_at: Date
   updated_at: Date
@@ -57,7 +63,8 @@ const EXCERPT_SOURCE = 1_000
 const EXCERPT_LENGTH = 200
 
 const dashboardSelect = (description: string) => `
-  SELECT d.id, d.name, ${description} AS description, d.visibility, d.version, d.created_at, d.updated_at,
+  SELECT d.id, d.name, ${description} AS description, d.visibility, d.version, d.layout_version,
+         d.created_at, d.updated_at,
          (SELECT count(*)::int FROM dashboard_panels p
            WHERE p.workspace_id = d.workspace_id AND p.dashboard_id = d.id) AS panel_count,
          d.created_by, ${authorNameSql("cu")} AS created_by_name,
@@ -72,8 +79,8 @@ const VISIBLE = "(d.visibility = 'workspace' OR d.created_by = $2)"
 // A panel's saved query only resolves within the panel's workspace; whether the
 // viewer ($3) may see it decides what the panel shows.
 const panelSelect = `
-  SELECT p.id, p.kind, p.title, p.saved_query_id, p.config, p.position, p.version, p.created_at,
-         p.updated_at,
+  SELECT p.id, p.kind, p.title, p.saved_query_id, p.config, p.grid_x, p.grid_y, p.grid_w, p.grid_h,
+         p.version, p.created_at, p.updated_at,
          CASE WHEN s.id IS NOT NULL
               THEN s.visibility = 'workspace' OR s.created_by IS NOT DISTINCT FROM $3 END AS query_visible,
          s.name AS query_name, s.visibility AS query_visibility, s.parameters AS query_parameters,
@@ -82,7 +89,7 @@ const panelSelect = `
     LEFT JOIN saved_queries s ON s.workspace_id = p.workspace_id AND s.id = p.saved_query_id
     LEFT JOIN connections c ON c.workspace_id = s.workspace_id AND c.id = s.connection_id`
 
-const PANEL_ORDER = "ORDER BY p.position, p.created_at, p.id"
+const PANEL_ORDER = "ORDER BY p.grid_y, p.grid_x, p.created_at, p.id"
 
 function toDashboard(row: DashboardRow): Dashboard {
   return {
@@ -91,6 +98,7 @@ function toDashboard(row: DashboardRow): Dashboard {
     description: row.description,
     visibility: row.visibility,
     version: row.version,
+    layoutVersion: row.layout_version,
     createdBy: toAuthor(row.created_by, row.created_by_name),
     updatedBy: toAuthor(row.updated_by, row.updated_by_name),
     createdAt: row.created_at.toISOString(),
@@ -106,7 +114,7 @@ export type PanelRecord = PanelDefinition & {
   id: string
   title: string
   savedQueryId: string | null
-  position: number
+  layout: PanelBox
   version: number
   createdAt: string
   updatedAt: string
@@ -141,7 +149,7 @@ function toPanel(row: PanelRow): PanelRecord {
     id: row.id,
     title: row.title,
     savedQueryId: row.saved_query_id,
-    position: row.position,
+    layout: { x: row.grid_x, y: row.grid_y, w: row.grid_w, h: row.grid_h },
     version: row.version,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -293,7 +301,7 @@ export class DashboardsRepository {
     return rows.map((row) => row.name)
   }
 
-  /** Adds a panel at the end; "limit" when the dashboard is full, null when it is gone. */
+  /** Adds a panel below the others at its kind's default size; "limit" when the dashboard is full, null when it is gone. */
   async insertPanel(
     workspaceId: string,
     dashboardId: string,
@@ -301,16 +309,14 @@ export class DashboardsRepository {
     userId: string,
   ): Promise<{ id: string } | "limit" | null> {
     return this.panelChange<{ id: string } | "limit">(workspaceId, dashboardId, userId, async (client) => {
-      const { rows: counted } = await client.query<{ count: number; next: number }>(
-        `SELECT count(*)::int AS count, coalesce(max(position) + 1, 0)::int AS next
-           FROM dashboard_panels WHERE workspace_id = $1 AND dashboard_id = $2`,
-        [workspaceId, dashboardId],
-      )
-      const { count = 0, next = 0 } = counted[0] ?? {}
-      if (count >= DASHBOARD_LIMITS.panelsPerDashboard) return { changed: false, result: "limit" as const }
+      const boxes = await this.boxes(client, workspaceId, dashboardId)
+      if (boxes.length >= DASHBOARD_LIMITS.panelsPerDashboard)
+        return { changed: false, result: "limit" as const }
+      const size = PANEL_SIZES[values.kind].default
       const { rows } = await client.query<{ id: string }>(
-        `INSERT INTO dashboard_panels (workspace_id, dashboard_id, kind, title, saved_query_id, config, position)
-         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+        `INSERT INTO dashboard_panels
+           (workspace_id, dashboard_id, kind, title, saved_query_id, config, grid_x, grid_y, grid_w, grid_h)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, 0, $7, $8, $9)
          RETURNING id`,
         [
           workspaceId,
@@ -319,7 +325,9 @@ export class DashboardsRepository {
           values.title,
           values.savedQueryId,
           JSON.stringify(values.config),
-          next,
+          bottom(boxes),
+          size.w,
+          size.h,
         ],
       )
       const id = rows[0]?.id
@@ -328,7 +336,10 @@ export class DashboardsRepository {
     })
   }
 
-  /** Replaces a panel's definition if it is still at `version`. */
+  /**
+   * Replaces a panel's definition if it is still at `version`. A panel too
+   * small for its new kind grows to the kind's minimum, pushing others down.
+   */
   async updatePanel(
     workspaceId: string,
     dashboardId: string,
@@ -354,7 +365,11 @@ export class DashboardsRepository {
           JSON.stringify(values.config),
         ],
       )
-      if ((rowCount ?? 0) > 0) return { changed: true, result: "saved" as const }
+      if ((rowCount ?? 0) > 0) {
+        const fitted = fitKind(await this.boxes(client, workspaceId, dashboardId), panelId, values.kind)
+        if (fitted) await this.writeLayout(client, workspaceId, dashboardId, fitted)
+        return { changed: true, result: "saved" as const }
+      }
       const { rowCount: exists } = await client.query(
         "SELECT 1 FROM dashboard_panels WHERE workspace_id = $1 AND dashboard_id = $2 AND id = $3",
         [workspaceId, dashboardId, panelId],
@@ -382,34 +397,76 @@ export class DashboardsRepository {
   }
 
   /**
-   * Puts the panels in the order of `panelIds`, which must list exactly the
-   * dashboard's panels: "mismatch" (nothing changed) when it does not, e.g.
-   * because someone added or removed a panel since.
+   * Saves every panel's box if the layout is still at `version`. "mismatch"
+   * (nothing changed) when the boxes do not name exactly the dashboard's
+   * panels, e.g. because someone added or removed one since; a problem when
+   * the boxes do not fit the grid or the panels' kinds, or overlap.
    */
-  async reorder(
+  async saveLayout(
     workspaceId: string,
     dashboardId: string,
-    panelIds: string[],
+    version: number,
+    boxes: PlacedBox[],
     userId: string,
-  ): Promise<"saved" | "mismatch" | "missing"> {
-    const outcome = await this.panelChange(workspaceId, dashboardId, userId, async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        "SELECT id FROM dashboard_panels WHERE workspace_id = $1 AND dashboard_id = $2",
+  ): Promise<"saved" | "stale" | "mismatch" | { panelId: string; message: string } | "missing"> {
+    type Outcome = "saved" | "stale" | "mismatch" | { panelId: string; message: string }
+    const outcome = await this.panelChange<Outcome>(workspaceId, dashboardId, userId, async (client) => {
+      const { rows: current } = await client.query<{ layout_version: number }>(
+        "SELECT layout_version FROM dashboards WHERE workspace_id = $1 AND id = $2",
         [workspaceId, dashboardId],
       )
-      const current = new Set(rows.map((row) => row.id))
-      if (current.size !== panelIds.length || !panelIds.every((id) => current.has(id))) {
-        return { changed: false, result: "mismatch" as const }
-      }
-      await client.query(
-        `UPDATE dashboard_panels p SET position = o.n - 1
-           FROM unnest($3::uuid[]) WITH ORDINALITY AS o (id, n)
-          WHERE p.workspace_id = $1 AND p.dashboard_id = $2 AND p.id = o.id`,
-        [workspaceId, dashboardId, panelIds],
+      if (current[0]?.layout_version !== version) return { changed: false, result: "stale" }
+      const { rows } = await client.query<{ id: string; kind: PanelKind }>(
+        "SELECT id, kind FROM dashboard_panels WHERE workspace_id = $1 AND dashboard_id = $2",
+        [workspaceId, dashboardId],
       )
-      return { changed: true, result: "saved" as const }
+      const kinds = new Map(rows.map((row) => [row.id, row.kind]))
+      if (kinds.size !== boxes.length || !boxes.every((box) => kinds.has(box.id))) {
+        return { changed: false, result: "mismatch" }
+      }
+      const problem = layoutProblem(boxes, kinds)
+      if (problem) return { changed: false, result: problem }
+      await this.writeLayout(client, workspaceId, dashboardId, boxes)
+      return { changed: true, result: "saved" }
     })
     return outcome ?? "missing"
+  }
+
+  /** The dashboard's panels' boxes, read inside a panel change. */
+  private async boxes(client: PoolClient, workspaceId: string, dashboardId: string): Promise<PlacedBox[]> {
+    const { rows } = await client.query<PlacedBox>(
+      `SELECT id, grid_x AS x, grid_y AS y, grid_w AS w, grid_h AS h
+         FROM dashboard_panels WHERE workspace_id = $1 AND dashboard_id = $2`,
+      [workspaceId, dashboardId],
+    )
+    return rows
+  }
+
+  /** Writes the boxes and moves the layout to its next version. */
+  private async writeLayout(
+    client: PoolClient,
+    workspaceId: string,
+    dashboardId: string,
+    boxes: PlacedBox[],
+  ): Promise<void> {
+    await client.query(
+      `UPDATE dashboard_panels p SET grid_x = b.x, grid_y = b.y, grid_w = b.w, grid_h = b.h
+         FROM unnest($3::uuid[], $4::int[], $5::int[], $6::int[], $7::int[]) AS b (id, x, y, w, h)
+        WHERE p.workspace_id = $1 AND p.dashboard_id = $2 AND p.id = b.id`,
+      [
+        workspaceId,
+        dashboardId,
+        boxes.map((box) => box.id),
+        boxes.map((box) => box.x),
+        boxes.map((box) => box.y),
+        boxes.map((box) => box.w),
+        boxes.map((box) => box.h),
+      ],
+    )
+    await client.query(
+      "UPDATE dashboards SET layout_version = layout_version + 1 WHERE workspace_id = $1 AND id = $2",
+      [workspaceId, dashboardId],
+    )
   }
 
   /**

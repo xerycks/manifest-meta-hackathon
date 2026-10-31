@@ -137,14 +137,17 @@ export class SavedQueriesService {
    * Runs the saved query with the run's values (else the defaults), resolved
    * in the workspace time zone now. The executor applies the source's current
    * schemas, validators, limits, and admission (429 QUERY_BUSY passes through).
+   * Aborting `signal` cancels the query; `origin` records who asked
+   * (a dashboard refresh, or the saved query's own page).
    */
   async run(
     workspaceId: string,
     userId: string,
     id: string,
     values: RunValues,
-    signal?: AbortSignal,
+    options: { signal?: AbortSignal; origin?: "saved_query" | "dashboard" } = {},
   ): Promise<SavedQueryRun> {
+    const { signal, origin = "saved_query" } = options
     const savedQuery = await this.visible(workspaceId, userId, id)
     const timeZone = await workspaceTimeZone(this.deps.settings, workspaceId)
     const compiled = await compileQuery(savedQuery.query)
@@ -164,7 +167,7 @@ export class SavedQueriesService {
       workspaceId,
       userId,
       connectionId: savedQuery.source.id,
-      origin: "saved_query",
+      origin,
       query: compiled.bind(bound),
       savedQueryId: savedQuery.id,
       parameters: resolvedValues(parameters),

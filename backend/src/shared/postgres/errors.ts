@@ -12,3 +12,10 @@ export function isUniqueViolation(error: unknown, constraint?: string): boolean 
 export function isForeignKeyViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23503"
 }
+
+/** PostgreSQL rejected a write because it fails a check constraint (SQLSTATE 23514), optionally the named one. */
+export function isCheckViolation(error: unknown, constraint?: string): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false
+  const violation = error as { code: unknown; constraint?: unknown }
+  return violation.code === "23514" && (constraint === undefined || violation.constraint === constraint)
+}

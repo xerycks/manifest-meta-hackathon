@@ -1,11 +1,14 @@
-import type { ExecutionPreview, QueryExecutionsRepository } from "../queries/repository.js"
+import type { ExecutionPreview, LatestRun, QueryExecutionsRepository } from "../queries/repository.js"
 import type { SavedQueriesRepository } from "../saved-queries/repository.js"
+import type { SavedQueriesService } from "../saved-queries/service.js"
 import { AppError } from "../shared/http/errors.js"
 import { parseInput } from "../shared/http/validate.js"
-import { isForeignKeyViolation, isUniqueViolation } from "../shared/postgres/errors.js"
+import { isCheckViolation, isForeignKeyViolation, isUniqueViolation } from "../shared/postgres/errors.js"
 import { MANAGER_ROLES } from "../workspaces/access.js"
 import type { WorkspaceRole } from "../workspaces/repository.js"
-import { columnProblem, panelResult } from "./panels.js"
+import { GRID } from "./layout.js"
+import { columnProblem, panelResult, panelRows } from "./panels.js"
+import type { DashboardRefresher, RefreshProgress } from "./refresh.js"
 import type { DashboardsRepository, PanelRecord, PanelValues } from "./repository.js"
 import {
   DASHBOARD_LIMITS,
@@ -15,8 +18,11 @@ import {
   type DashboardDetail,
   type DashboardList,
   type DashboardPanel,
+  type DashboardRefresh,
   type PanelData,
   type PanelInput,
+  type PanelStatus,
+  type SaveLayoutInput,
   type UpdateDashboardInput,
   type UpdatePanelInput,
 } from "./schemas.js"
@@ -33,13 +39,24 @@ export interface DashboardsServiceDeps {
   dashboards: DashboardsRepository
   savedQueries: SavedQueriesRepository
   executions: QueryExecutionsRepository
+  /** Running panels' saved queries; null without CONNECTION_ENCRYPTION_KEY (refreshes answer 503). */
+  refreshes: { refresher: DashboardRefresher; runs: SavedQueriesService } | null
 }
 
-/** A saved query deleted between checking it and saving the panel. */
-function savedQueryGone(error: unknown): unknown {
-  return isForeignKeyViolation(error)
-    ? AppError.validation("That saved query was just deleted. Choose another.", { field: "savedQueryId" })
-    : error
+/**
+ * A saved query deleted between checking it and saving the panel, or a panel
+ * placed (below the others, or pushed down as it grows) past the grid's last row.
+ */
+function panelNotSaved(error: unknown): unknown {
+  if (isForeignKeyViolation(error)) {
+    return AppError.validation("That saved query was just deleted. Choose another.", { field: "savedQueryId" })
+  }
+  if (isCheckViolation(error, "dashboard_panels_grid_check")) {
+    return AppError.conflict(
+      `There is no room for this panel within the grid's ${GRID.maxRow} rows. Move panels up to make room, then try again.`,
+    )
+  }
+  return error
 }
 
 function nameTaken(name: string): AppError {
@@ -75,12 +92,82 @@ function panelData(record: PanelRecord, previews: Map<string, ExecutionPreview>)
   }
 }
 
-function toPanel(record: PanelRecord, previews: Map<string, ExecutionPreview>): DashboardPanel {
+function toPanel(
+  record: PanelRecord,
+  previews: Map<string, ExecutionPreview>,
+  statuses: Map<string, PanelStatus>,
+): DashboardPanel {
   const { query, ...panel } = record
   // Someone else's private saved query is not named, not even by its id.
   const savedQueryId = query?.visible === false ? null : panel.savedQueryId
-  return { ...panel, savedQueryId, data: panelData(record, previews) }
+  return {
+    ...panel,
+    savedQueryId,
+    data: panelData(record, previews),
+    status: statuses.get(record.id) ?? null,
+  }
 }
+
+/** The saved query a panel shows, when the viewer may read it. */
+function readableQuery(record: PanelRecord): string | null {
+  return record.kind !== "markdown" && record.query?.visible ? record.savedQueryId : null
+}
+
+/** Why a refresh cannot run a panel's saved query, or null when it can. */
+function refreshProblem(record: PanelRecord): string | null {
+  if (record.kind === "markdown") return "A Markdown panel has nothing to refresh."
+  if (!record.query) return "This panel's saved query was deleted."
+  if (!record.query.visible) return "This panel shows a saved query that only its creator can see."
+  if (record.query.savedQuery.needsValues) {
+    return `“${record.query.savedQuery.name}” needs parameter values, so run it from its own page.`
+  }
+  return null
+}
+
+const time = (iso: string) => Date.parse(iso)
+
+/**
+ * A panel's status from its saved query's latest run and this process's
+ * refreshes. A failure noted by a refresh (such as a run that never got a
+ * slot) counts when it is at least as new as the latest recorded run.
+ */
+function panelStatus(
+  latest: LatestRun | undefined,
+  progress: RefreshProgress,
+  savedQueryId: string,
+): PanelStatus {
+  const lastSuccessAt = latest?.lastSuccessAt ?? null
+  const run = latest?.latest ?? null
+  if (progress.refreshing.has(savedQueryId) || run?.status === "running") {
+    const since = progress.refreshing.get(savedQueryId) ?? run?.createdAt ?? null
+    return { state: "refreshing", since, lastSuccessAt }
+  }
+  const noted = progress.failures.get(savedQueryId)
+  if (noted && (!run || time(noted.at) >= time(run.createdAt))) {
+    return noted.code === "QUERY_CANCELLED"
+      ? { state: "stale", reason: "cancelled", lastSuccessAt }
+      : { state: "failed", failure: noted, lastSuccessAt }
+  }
+  if (!run) return { state: "stale", reason: "not_run", lastSuccessAt }
+  switch (run.status) {
+    case "succeeded":
+      return { state: "fresh", lastSuccessAt: lastSuccessAt ?? run.createdAt }
+    case "cancelled":
+      return { state: "stale", reason: "cancelled", lastSuccessAt }
+    default:
+      return {
+        state: "failed",
+        failure: {
+          code: run.error?.code ?? "QUERY_FAILED",
+          message: run.error?.message ?? "The query did not succeed.",
+          at: run.finishedAt ?? run.createdAt,
+        },
+        lastSuccessAt,
+      }
+  }
+}
+
+const IDLE: RefreshProgress = { active: false, startedAt: null, refreshing: new Map(), failures: new Map() }
 
 /**
  * Dashboards: workspace-visible ones are every member's to view; private ones
@@ -112,7 +199,7 @@ export class DashboardsService {
         `A workspace can have at most ${DASHBOARD_LIMITS.perWorkspace} dashboards. Delete one to create another.`,
       )
     }
-    return { ...created, panels: [] }
+    return { ...created, panels: [], refresh: { active: false, startedAt: null } }
   }
 
   /** A save based on an older version gets 409 with the current dashboard. */
@@ -166,7 +253,7 @@ export class DashboardsService {
     try {
       added = await this.deps.dashboards.insertPanel(workspaceId, dashboardId, values, actor.userId)
     } catch (error) {
-      throw savedQueryGone(error)
+      throw panelNotSaved(error)
     }
     if (added === null) throw AppError.notFound(NOT_FOUND)
     if (added === "limit") {
@@ -213,7 +300,7 @@ export class DashboardsService {
         actor.userId,
       )
     } catch (error) {
-      throw savedQueryGone(error)
+      throw panelNotSaved(error)
     }
     if (outcome === "missing") throw AppError.notFound(PANEL_NOT_FOUND)
     if (outcome === "stale") {
@@ -229,35 +316,148 @@ export class DashboardsService {
     }
   }
 
-  /** `panelIds` lists every panel once; a list that no longer matches gets 409 with the current dashboard. */
-  async reorder(
+  /**
+   * Saves every panel's box at once. A layout based on an older one, or one
+   * that no longer lists exactly the dashboard's panels, gets 409 with the
+   * current dashboard; boxes that leave the grid, are smaller than their
+   * kind allows, or overlap get 422 naming the panel.
+   */
+  async saveLayout(
     workspaceId: string,
     dashboardId: string,
-    panelIds: string[],
+    input: SaveLayoutInput,
     actor: Actor,
   ): Promise<DashboardDetail> {
     await this.editable(workspaceId, dashboardId, actor)
-    const outcome = await this.deps.dashboards.reorder(workspaceId, dashboardId, panelIds, actor.userId)
+    const boxes = input.boxes.map(({ panelId, ...box }) => ({ id: panelId, ...box }))
+    const outcome = await this.deps.dashboards.saveLayout(
+      workspaceId,
+      dashboardId,
+      input.version,
+      boxes,
+      actor.userId,
+    )
     if (outcome === "missing") throw AppError.notFound(NOT_FOUND)
+    if (typeof outcome === "object") {
+      throw AppError.validation(outcome.message, { field: "boxes", panelId: outcome.panelId })
+    }
     const dashboard = await this.visible(workspaceId, actor.userId, dashboardId)
     const detail = await this.detail(workspaceId, dashboard, actor.userId)
+    if (outcome === "stale") throw AppError.stale("dashboard's layout", detail)
     if (outcome === "mismatch") {
       throw AppError.conflict(
-        "Panels were added or removed after you opened this dashboard. Review the current order, then move them again.",
+        "Panels were added or removed after you opened this dashboard. Review the current layout, then move them again.",
         { current: detail },
       )
     }
     return detail
   }
 
-  /** The dashboard with its panels and each query panel's latest stored result, cut to what it shows. */
+  /**
+   * Runs the saved queries of the dashboard's panels (or of the listed ones)
+   * with their defaults as the viewer, each once however many panels show
+   * it. Panels that cannot run here are skipped, or refused when listed:
+   * Markdown, removed or private saved queries, and saved queries that need
+   * parameter values. Answers at once with the refresh's progress.
+   */
+  async refresh(
+    workspaceId: string,
+    dashboardId: string,
+    userId: string,
+    panelIds: string[] | undefined,
+  ): Promise<DashboardRefresh> {
+    const { refresher, runs } = this.refreshes()
+    await this.visible(workspaceId, userId, dashboardId)
+    const records = await this.deps.dashboards.panels(workspaceId, dashboardId, userId)
+    const chosen = panelIds
+      ? panelIds.map((id) => {
+          const record = records.find((candidate) => candidate.id === id)
+          if (!record) throw AppError.notFound(PANEL_NOT_FOUND)
+          const problem = refreshProblem(record)
+          if (problem) throw AppError.validation(problem, { field: "panelIds", panelId: id })
+          return record
+        })
+      : records.filter((record) => !refreshProblem(record))
+    const savedQueryIds = new Set(chosen.flatMap((record) => readableQuery(record) ?? []))
+    refresher.start(
+      workspaceId,
+      dashboardId,
+      [...savedQueryIds].map((savedQueryId) => ({
+        savedQueryId,
+        run: (signal: AbortSignal) =>
+          runs.run(workspaceId, userId, savedQueryId, {}, { signal, origin: "dashboard" }),
+      })),
+    )
+    return this.refreshState(workspaceId, dashboardId, records)
+  }
+
+  /** Stops the dashboard's refresh; runs that another refresh still waits on keep going. */
+  async cancelRefresh(workspaceId: string, dashboardId: string, userId: string): Promise<DashboardRefresh> {
+    const { refresher } = this.refreshes()
+    await this.visible(workspaceId, userId, dashboardId)
+    await refresher.cancel(workspaceId, dashboardId)
+    const records = await this.deps.dashboards.panels(workspaceId, dashboardId, userId)
+    return this.refreshState(workspaceId, dashboardId, records)
+  }
+
+  /** Whether the dashboard is refreshing, with every panel's status. */
+  async refreshProgress(workspaceId: string, dashboardId: string, userId: string): Promise<DashboardRefresh> {
+    await this.visible(workspaceId, userId, dashboardId)
+    const records = await this.deps.dashboards.panels(workspaceId, dashboardId, userId)
+    return this.refreshState(workspaceId, dashboardId, records)
+  }
+
+  private refreshes(): NonNullable<DashboardsServiceDeps["refreshes"]> {
+    if (!this.deps.refreshes) throw AppError.connectionsNotConfigured()
+    return this.deps.refreshes
+  }
+
+  private async refreshState(
+    workspaceId: string,
+    dashboardId: string,
+    records: PanelRecord[],
+  ): Promise<DashboardRefresh> {
+    const { progress, statuses } = await this.statuses(workspaceId, dashboardId, records)
+    return {
+      active: progress.active,
+      startedAt: progress.startedAt,
+      panels: records.map((record) => ({ id: record.id, status: statuses.get(record.id) ?? null })),
+    }
+  }
+
+  /** Each query panel's status, by panel id. */
+  private async statuses(
+    workspaceId: string,
+    dashboardId: string,
+    records: PanelRecord[],
+  ): Promise<{ progress: RefreshProgress; statuses: Map<string, PanelStatus> }> {
+    const savedQueryIds = [...new Set(records.flatMap((record) => readableQuery(record) ?? []))]
+    const latest = await this.deps.executions.latestForSavedQueries(workspaceId, savedQueryIds)
+    const progress = this.deps.refreshes?.refresher.progress(workspaceId, dashboardId, savedQueryIds) ?? IDLE
+    const statuses = new Map<string, PanelStatus>()
+    for (const record of records) {
+      const savedQueryId = readableQuery(record)
+      if (savedQueryId) statuses.set(record.id, panelStatus(latest.get(savedQueryId), progress, savedQueryId))
+    }
+    return { progress, statuses }
+  }
+
+  /** The dashboard with its panels: each query panel's latest stored result, cut to what it shows, and status. */
   private async detail(
     workspaceId: string,
     dashboard: Dashboard,
     viewerId: string,
   ): Promise<DashboardDetail> {
     const records = await this.deps.dashboards.panels(workspaceId, dashboard.id, viewerId)
-    return { ...dashboard, panels: await this.withData(workspaceId, records) }
+    const [previews, { progress, statuses }] = await Promise.all([
+      this.previews(workspaceId, records),
+      this.statuses(workspaceId, dashboard.id, records),
+    ])
+    return {
+      ...dashboard,
+      panels: records.map((record) => toPanel(record, previews, statuses)),
+      refresh: { active: progress.active, startedAt: progress.startedAt },
+    }
   }
 
   private async panel(
@@ -268,19 +468,29 @@ export class DashboardsService {
   ): Promise<DashboardPanel> {
     const record = await this.deps.dashboards.panel(workspaceId, dashboardId, panelId, viewerId)
     if (!record) throw AppError.notFound(PANEL_NOT_FOUND)
-    const [panel] = await this.withData(workspaceId, [record])
-    if (!panel) throw AppError.notFound(PANEL_NOT_FOUND)
-    return panel
+    const [previews, { statuses }] = await Promise.all([
+      this.previews(workspaceId, [record]),
+      this.statuses(workspaceId, dashboardId, [record]),
+    ])
+    return toPanel(record, previews, statuses)
   }
 
-  private async withData(workspaceId: string, records: PanelRecord[]): Promise<DashboardPanel[]> {
-    const runIds = new Set<string>()
+  /** Reads each latest result once, with as many leading rows as the panels showing it need. */
+  private async previews(
+    workspaceId: string,
+    records: PanelRecord[],
+  ): Promise<Map<string, ExecutionPreview>> {
+    const rowsByRun = new Map<string, number>()
     for (const record of records) {
-      if (record.query?.visible && record.query.lastExecutionId) runIds.add(record.query.lastExecutionId)
+      const runId = record.query?.visible ? record.query.lastExecutionId : null
+      if (runId) rowsByRun.set(runId, Math.max(rowsByRun.get(runId) ?? 0, panelRows(record.kind).rows))
     }
-    const previews = await this.deps.executions.previews(workspaceId, [...runIds], DASHBOARD_LIMITS.tableRows)
-    const byId = new Map(previews.map((preview) => [preview.id, preview]))
-    return records.map((record) => toPanel(record, byId))
+    const idsByRows = new Map<number, string[]>()
+    for (const [runId, rows] of rowsByRun) idsByRows.set(rows, [...(idsByRows.get(rows) ?? []), runId])
+    const previews = await Promise.all(
+      [...idsByRows].map(([rows, ids]) => this.deps.executions.previews(workspaceId, ids, rows)),
+    )
+    return new Map(previews.flat().map((preview) => [preview.id, preview]))
   }
 
   private async visible(workspaceId: string, userId: string, id: string): Promise<Dashboard> {

@@ -3,6 +3,7 @@ import { z } from "zod"
 import type { Author } from "../auth/repository.js"
 import type { Engine } from "../connections/schemas.js"
 import type { QueryResult } from "../queries/schemas.js"
+import { GRID } from "./layout.js"
 
 export const DASHBOARD_LIMITS = {
   nameChars: 200,
@@ -18,11 +19,40 @@ export const DASHBOARD_LIMITS = {
   tableRows: 100,
   /** Those rows as JSON, per panel, so a dashboard response stays a few megabytes at most. */
   panelBytes: 128 * 1024,
+  /** Columns of values a bar or line chart plots. */
+  seriesColumns: 5,
+  /** Rows a bar, line, or Sankey chart carries (a stored result keeps at most 1,000). */
+  chartRows: 1_000,
+  /** Those rows as JSON, per chart panel. */
+  chartBytes: 256 * 1024,
+  /** Items a ticker shows. */
+  tickerRows: 50,
+  gaugeThresholds: 4,
+  /** The largest magnitude a gauge's bounds and thresholds may have. */
+  gaugeBound: 1e15,
 } as const
 
-export const PANEL_KINDS = ["number", "table", "markdown"] as const
+export const PANEL_KINDS = [
+  "number",
+  "table",
+  "markdown",
+  "bar",
+  "line",
+  "gauge",
+  "ticker",
+  "sankey",
+] as const
 
 export type PanelKind = (typeof PANEL_KINDS)[number]
+
+/** Kinds that draw a chart from a saved query's result. */
+export const CHART_KINDS = [
+  "bar",
+  "line",
+  "gauge",
+  "ticker",
+  "sankey",
+] as const satisfies readonly PanelKind[]
 
 export const NUMBER_FORMATS = ["number", "currency", "percent"] as const
 
@@ -41,37 +71,72 @@ const columnSchema = z
 
 const CURRENCIES = new Set(Intl.supportedValuesOf("currency"))
 
+const decimalsSchema = z.number().int().min(0).max(DASHBOARD_LIMITS.maxDecimals).nullable().default(null)
+const currencySchema = z
+  .string()
+  .refine((code) => CURRENCIES.has(code), "Use a three-letter ISO 4217 currency code, such as USD or EUR")
+  .nullable()
+  .default(null)
+
+/**
+ * How values are written: a percent value is a ratio (0.25 shows as 25%),
+ * decimals null keeps a value exactly as stored, and a currency is needed
+ * (and kept) only for currency values.
+ */
+const valueFormatShape = {
+  format: z.enum(NUMBER_FORMATS).default("number"),
+  decimals: decimalsSchema,
+  currency: currencySchema,
+}
+
+interface ValueFormat {
+  format: NumberFormat
+  currency: string | null
+}
+
+function checkCurrency(config: ValueFormat, context: z.RefinementCtx): void {
+  if (config.format === "currency" && config.currency === null) {
+    context.addIssue({ code: "custom", path: ["currency"], message: "Choose the currency" })
+  }
+}
+
+const keepCurrency = <T extends ValueFormat>(config: T): T => ({
+  ...config,
+  currency: config.format === "currency" ? config.currency : null,
+})
+
+/** Adds an issue at `path` when `column` repeats one of `others`. */
+function distinctColumn(
+  context: z.RefinementCtx,
+  path: string,
+  column: string | null,
+  others: (string | null)[],
+  message: string,
+): void {
+  if (column !== null && others.includes(column)) context.addIssue({ code: "custom", path: [path], message })
+}
+
 /**
  * A number panel shows one value from the first row of the result, with an
- * optional comparison column whose difference it shows next to it. A percent
- * value is a ratio (0.25 shows as 25%). decimals null keeps the value exactly
- * as stored.
+ * optional comparison column whose difference it shows next to it.
  */
 export const numberConfigSchema = z
   .strictObject({
     valueColumn: columnSchema,
     comparisonColumn: columnSchema.nullable().default(null),
-    format: z.enum(NUMBER_FORMATS).default("number"),
-    decimals: z.number().int().min(0).max(DASHBOARD_LIMITS.maxDecimals).nullable().default(null),
-    currency: z
-      .string()
-      .refine((code) => CURRENCIES.has(code), "Use a three-letter ISO 4217 currency code, such as USD or EUR")
-      .nullable()
-      .default(null),
+    ...valueFormatShape,
   })
   .superRefine((config, context) => {
-    if (config.format === "currency" && config.currency === null) {
-      context.addIssue({ code: "custom", path: ["currency"], message: "Choose the currency" })
-    }
-    if (config.comparisonColumn !== null && config.comparisonColumn === config.valueColumn) {
-      context.addIssue({
-        code: "custom",
-        path: ["comparisonColumn"],
-        message: "Compare the value with a different column",
-      })
-    }
+    checkCurrency(config, context)
+    distinctColumn(
+      context,
+      "comparisonColumn",
+      config.comparisonColumn,
+      [config.valueColumn],
+      "Compare the value with a different column",
+    )
   })
-  .transform((config) => ({ ...config, currency: config.format === "currency" ? config.currency : null }))
+  .transform(keepCurrency)
 
 export type NumberConfig = z.infer<typeof numberConfigSchema>
 
@@ -100,6 +165,172 @@ export const markdownConfigSchema = z.strictObject({
 })
 
 export type MarkdownConfig = z.infer<typeof markdownConfigSchema>
+
+/** Result order, by the x column, or by the row's total value. */
+export const SERIES_SORTS = ["none", "x", "value_desc", "value_asc"] as const
+
+export type SeriesSort = (typeof SERIES_SORTS)[number]
+
+/** How the x axis writes its values; auto follows the column's kind. */
+export const X_FORMATS = ["auto", "text", "date", "month", "datetime"] as const
+
+export type XFormat = (typeof X_FORMATS)[number]
+
+const seriesShape = {
+  /** Categories (bar) or positions along the axis (line), one per row. */
+  xColumn: columnSchema,
+  /** One series per column, plotted against one value axis. */
+  yColumns: z
+    .array(columnSchema)
+    .min(1, "Choose at least one column of values")
+    .max(DASHBOARD_LIMITS.seriesColumns, `Choose at most ${DASHBOARD_LIMITS.seriesColumns} columns of values`)
+    .refine((columns) => new Set(columns).size === columns.length, "Choose each column once"),
+  stacked: z.boolean().default(false),
+  sort: z.enum(SERIES_SORTS).default("none"),
+  xFormat: z.enum(X_FORMATS).default("auto"),
+  ...valueFormatShape,
+}
+
+function checkSeries(
+  config: { xColumn: string; yColumns: string[] } & ValueFormat,
+  context: z.RefinementCtx,
+): void {
+  checkCurrency(config, context)
+  if (config.yColumns.includes(config.xColumn)) {
+    context.addIssue({ code: "custom", path: ["yColumns"], message: "Plot columns other than the x column" })
+  }
+}
+
+/** A bar chart: one bar per row (stacked or side by side per series); value sorts use the row's total. */
+export const barConfigSchema = z.strictObject(seriesShape).superRefine(checkSeries).transform(keepCurrency)
+
+export type BarConfig = z.infer<typeof barConfigSchema>
+
+/** A line chart: one line per series along the x column; stacked lines show running totals as areas. */
+export const lineConfigSchema = z
+  .strictObject(seriesShape)
+  .superRefine((config, context) => {
+    checkSeries(config, context)
+    if (config.sort !== "none" && config.sort !== "x") {
+      context.addIssue({
+        code: "custom",
+        path: ["sort"],
+        message: "Keep a line in result order or order it by the x column",
+      })
+    }
+  })
+  .transform(keepCurrency)
+
+export type LineConfig = z.infer<typeof lineConfigSchema>
+
+export const THRESHOLD_STATUSES = ["good", "warning", "critical"] as const
+
+export type ThresholdStatus = (typeof THRESHOLD_STATUSES)[number]
+
+const boundSchema = z
+  .number()
+  .min(-DASHBOARD_LIMITS.gaugeBound, "Use a smaller number")
+  .max(DASHBOARD_LIMITS.gaugeBound, "Use a smaller number")
+
+/**
+ * A gauge shows one value from the first row on a scale from min to max. A
+ * threshold marks where a status starts: the value shows the status of the
+ * highest threshold it reaches.
+ */
+export const gaugeConfigSchema = z
+  .strictObject({
+    valueColumn: columnSchema,
+    min: boundSchema.default(0),
+    max: boundSchema,
+    thresholds: z
+      .array(z.strictObject({ value: boundSchema, status: z.enum(THRESHOLD_STATUSES) }))
+      .max(
+        DASHBOARD_LIMITS.gaugeThresholds,
+        `A gauge can have at most ${DASHBOARD_LIMITS.gaugeThresholds} thresholds`,
+      )
+      .default([]),
+    ...valueFormatShape,
+  })
+  .superRefine((config, context) => {
+    checkCurrency(config, context)
+    if (config.max <= config.min) {
+      context.addIssue({ code: "custom", path: ["max"], message: "The maximum must be above the minimum" })
+    }
+    config.thresholds.forEach((threshold, index) => {
+      const previous = config.thresholds[index - 1]
+      if (threshold.value < config.min || threshold.value > config.max) {
+        context.addIssue({
+          code: "custom",
+          path: ["thresholds", index, "value"],
+          message: "A threshold must lie between the minimum and the maximum",
+        })
+      } else if (previous && threshold.value <= previous.value) {
+        context.addIssue({
+          code: "custom",
+          path: ["thresholds", index, "value"],
+          message: "List thresholds from the lowest to the highest, each once",
+        })
+      }
+    })
+  })
+  .transform(keepCurrency)
+
+export type GaugeConfig = z.infer<typeof gaugeConfigSchema>
+
+/** A ticker: a compact row of label and value items, one per row, with an optional change beside each. */
+export const tickerConfigSchema = z
+  .strictObject({
+    labelColumn: columnSchema,
+    valueColumn: columnSchema,
+    deltaColumn: columnSchema.nullable().default(null),
+    ...valueFormatShape,
+  })
+  .superRefine((config, context) => {
+    checkCurrency(config, context)
+    distinctColumn(
+      context,
+      "valueColumn",
+      config.valueColumn,
+      [config.labelColumn],
+      "Use a different column for the labels",
+    )
+    distinctColumn(
+      context,
+      "deltaColumn",
+      config.deltaColumn,
+      [config.labelColumn, config.valueColumn],
+      "Use a different column for the change",
+    )
+  })
+  .transform(keepCurrency)
+
+export type TickerConfig = z.infer<typeof tickerConfigSchema>
+
+/** A Sankey diagram: flows from source to target, as wide as the sum of their values. */
+export const sankeyConfigSchema = z
+  .strictObject({
+    sourceColumn: columnSchema,
+    targetColumn: columnSchema,
+    valueColumn: columnSchema,
+  })
+  .superRefine((config, context) => {
+    distinctColumn(
+      context,
+      "targetColumn",
+      config.targetColumn,
+      [config.sourceColumn],
+      "Use a different column for the targets",
+    )
+    distinctColumn(
+      context,
+      "valueColumn",
+      config.valueColumn,
+      [config.sourceColumn, config.targetColumn],
+      "Use a different column for the values",
+    )
+  })
+
+export type SankeyConfig = z.infer<typeof sankeyConfigSchema>
 
 const titleSchema = z
   .string()
@@ -131,6 +362,36 @@ export const panelInputSchema = z.discriminatedUnion("kind", [
     title: titleSchema,
     config: markdownConfigSchema,
   }),
+  z.strictObject({
+    kind: z.literal("bar"),
+    title: titleSchema,
+    savedQueryId: savedQueryIdSchema,
+    config: barConfigSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("line"),
+    title: titleSchema,
+    savedQueryId: savedQueryIdSchema,
+    config: lineConfigSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("gauge"),
+    title: titleSchema,
+    savedQueryId: savedQueryIdSchema,
+    config: gaugeConfigSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("ticker"),
+    title: titleSchema,
+    savedQueryId: savedQueryIdSchema,
+    config: tickerConfigSchema,
+  }),
+  z.strictObject({
+    kind: z.literal("sankey"),
+    title: titleSchema,
+    savedQueryId: savedQueryIdSchema,
+    config: sankeyConfigSchema,
+  }),
 ])
 
 export type PanelInput = z.infer<typeof panelInputSchema>
@@ -141,6 +402,11 @@ export type PanelDefinition =
   | { kind: "number"; config: NumberConfig }
   | { kind: "table"; config: TableConfig }
   | { kind: "markdown"; config: MarkdownConfig }
+  | { kind: "bar"; config: BarConfig }
+  | { kind: "line"; config: LineConfig }
+  | { kind: "gauge"; config: GaugeConfig }
+  | { kind: "ticker"; config: TickerConfig }
+  | { kind: "sankey"; config: SankeyConfig }
 
 /** Changes to a panel; the result is checked again as a whole definition of its (new) kind. */
 export const updatePanelSchema = z
@@ -162,14 +428,50 @@ export const updatePanelSchema = z
 
 export type UpdatePanelInput = z.infer<typeof updatePanelSchema>
 
-export const reorderPanelsSchema = z.strictObject({
-  panelIds: z
-    .array(z.uuid())
+/** A panel's box on the dashboard grid: column, row, width in columns, height in rows. */
+export interface PanelBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+const gridInt = (min: number, max: number) => z.number().int().min(min).max(max)
+
+/** Every panel's box at once; the boxes must fit the grid and the panels' kinds, and not overlap. */
+export const saveLayoutSchema = z.strictObject({
+  /** The dashboard's layoutVersion this layout is based on. */
+  version: z.number().int().min(1).max(2_147_483_647),
+  boxes: z
+    .array(
+      z.strictObject({
+        panelId: z.uuid(),
+        x: gridInt(0, GRID.columns - 1),
+        y: gridInt(0, GRID.maxRow),
+        w: gridInt(1, GRID.columns),
+        h: gridInt(1, GRID.maxHeight),
+      }),
+    )
     .max(DASHBOARD_LIMITS.panelsPerDashboard)
-    .refine((ids) => new Set(ids).size === ids.length, "List each panel once"),
+    .refine(
+      (boxes) => new Set(boxes.map((box) => box.panelId)).size === boxes.length,
+      "List each panel once",
+    ),
 })
 
-export type ReorderPanelsInput = z.infer<typeof reorderPanelsSchema>
+export type SaveLayoutInput = z.infer<typeof saveLayoutSchema>
+
+/** Refreshes every panel, or only the listed ones. */
+export const refreshSchema = z.strictObject({
+  panelIds: z
+    .array(z.uuid())
+    .min(1)
+    .max(DASHBOARD_LIMITS.panelsPerDashboard)
+    .refine((ids) => new Set(ids).size === ids.length, "List each panel once")
+    .optional(),
+})
+
+export type RefreshInput = z.infer<typeof refreshSchema>
 
 const nameSchema = z
   .string()
@@ -225,10 +527,12 @@ export interface Dashboard {
   visibility: Visibility
   /** Increases with every edit of the name, description, or visibility. */
   version: number
+  /** Increases with every layout save, and when a panel grows to fit a new kind. */
+  layoutVersion: number
   createdBy: Author | null
   updatedBy: Author | null
   createdAt: string
-  /** Also moves when panels are added, changed, reordered, or removed. */
+  /** Also moves when panels are added, changed, moved, resized, or removed. */
   updatedAt: string
 }
 
@@ -263,7 +567,10 @@ export interface PanelRun {
   finishedAt: string | null
   /** Its parameter values as they resolved, by name. */
   parameters: Record<string, string | null> | null
-  /** Only the columns the panel shows; a number panel gets the first row, a table up to 100 rows. */
+  /**
+   * Only the columns the panel shows, and the rows it shows: the first for a
+   * number or gauge, up to 100 for a table, 50 for a ticker, 1,000 for a chart.
+   */
   result: QueryResult
   /** The result holds fewer rows than the query returned. */
   partialResult: boolean
@@ -277,21 +584,52 @@ export type PanelData =
   /** latestRun is null until the saved query has a succeeded run. */
   | { state: "available"; savedQuery: PanelSavedQuery; latestRun: PanelRun | null }
 
+/** A run that did not succeed, as the viewer may read it. */
+export interface RefreshFailure {
+  code: string
+  /** Safe to show: written by Manifest, never a raw driver error. */
+  message: string
+  at: string
+}
+
+/**
+ * How current a query panel is, from its saved query's latest run: fresh
+ * when that run succeeded, refreshing while one runs or waits for a slot,
+ * failed when it did not succeed, and stale when it was cancelled or the
+ * saved query has never run. The panel keeps showing the last good result.
+ */
+export type PanelStatus =
+  | { state: "fresh"; lastSuccessAt: string }
+  /** since is null while it waits its turn in a refresh. */
+  | { state: "refreshing"; since: string | null; lastSuccessAt: string | null }
+  | { state: "failed"; failure: RefreshFailure; lastSuccessAt: string | null }
+  | { state: "stale"; reason: "cancelled" | "not_run"; lastSuccessAt: string | null }
+
 export type DashboardPanel = PanelDefinition & {
   id: string
   /** "" shows the saved query's name (or nothing, for Markdown). */
   title: string
   /** Null for Markdown panels, once the saved query is deleted, and while it is private to someone else. */
   savedQueryId: string | null
-  position: number
+  layout: PanelBox
   version: number
   createdAt: string
   updatedAt: string
   /** What a query panel shows; null for Markdown panels. */
   data: PanelData | null
+  /** Null for Markdown panels and panels whose saved query the viewer cannot read. */
+  status: PanelStatus | null
+}
+
+/** The dashboard's refresh, if one is running, with every panel's status. */
+export interface DashboardRefresh {
+  active: boolean
+  startedAt: string | null
+  panels: { id: string; status: PanelStatus | null }[]
 }
 
 export interface DashboardDetail extends Dashboard {
-  /** In dashboard order. */
+  /** In dashboard order: top to bottom, then left to right. */
   panels: DashboardPanel[]
+  refresh: { active: boolean; startedAt: string | null }
 }

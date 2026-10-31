@@ -2,6 +2,7 @@ import { AgentRunsRepository } from "./agent/repository.js"
 import { AgentRunner } from "./agent/runner.js"
 import { loadEnv } from "./config/env.js"
 import { closeSourceAdapters, createSourceAdapters } from "./connections/adapters/index.js"
+import { DashboardRefresher } from "./dashboards/refresh.js"
 import { ManifestsRepository } from "./manifests/repository.js"
 import { RefreshRunner } from "./manifests/runner.js"
 import { QueryExecutionsRepository } from "./queries/repository.js"
@@ -41,7 +42,8 @@ const sources = createSourceAdapters()
 const refreshes = new RefreshRunner()
 const queries = new QueryRunner()
 const agents = new AgentRunner()
-const app = createApp(env, { pool, sources, refreshes, queries, agents })
+const dashboardRefreshes = new DashboardRefresher()
+const app = createApp(env, { pool, sources, refreshes, queries, agents, dashboardRefreshes })
 
 const server = app.listen(env.PORT, env.HOST, () => {
   console.log(`manifest-backend listening on http://${env.HOST}:${env.PORT}`)
@@ -50,7 +52,12 @@ const server = app.listen(env.PORT, env.HOST, () => {
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
     // Running refreshes, queries, and agent runs stop now and record why; pools close once they have.
-    const stopped = Promise.all([refreshes.shutdown(), queries.shutdown(), agents.shutdown()])
+    const stopped = Promise.all([
+      refreshes.shutdown(),
+      dashboardRefreshes.shutdown(),
+      queries.shutdown(),
+      agents.shutdown(),
+    ])
     server.close(() => {
       void stopped
         .then(() => Promise.allSettled([closeSourceAdapters(sources), pool?.end()]))
