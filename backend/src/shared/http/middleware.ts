@@ -47,6 +47,7 @@ export const notFoundHandler: RequestHandler = (req, _res, next) => {
 
 export const errorHandler: ErrorRequestHandler = (error, req, res, _next) => {
   if (error instanceof AppError) {
+    for (const [name, value] of Object.entries(error.headers)) res.setHeader(name, value)
     res.status(error.status).json({
       success: false,
       error: {

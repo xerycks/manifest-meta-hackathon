@@ -512,6 +512,21 @@ export class ManifestsRepository {
     }))
   }
 
+  /** Names of present tables, views, and collections in the given schemas. */
+  async presentObjectNames(
+    workspaceId: string,
+    connectionId: string,
+    schemas: string[],
+  ): Promise<string[]> {
+    const { rows } = await this.pool.query<{ name: string }>(
+      `SELECT DISTINCT object_name AS name FROM manifest_objects
+        WHERE workspace_id = $1 AND connection_id = $2 AND present
+          AND schema_name = ANY ($3::text[])`,
+      [workspaceId, connectionId, schemas],
+    )
+    return rows.map((row) => row.name)
+  }
+
   async getObject(
     workspaceId: string,
     connectionId: string,

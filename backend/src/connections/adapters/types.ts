@@ -1,3 +1,5 @@
+import type { ValidatedMongoQuery } from "../../queries/mongodb-validator.js"
+import type { QueryLimits, QueryResult, SqlQuery } from "../../queries/schemas.js"
 import type { MongoConfig, PostgresConfig } from "../schemas.js"
 
 /** Decrypted credentials, held only in memory for the duration of a source call. */
@@ -40,6 +42,34 @@ export class SourceConnectionError extends Error {
     super(message)
     this.name = "SourceConnectionError"
     this.reason = reason
+  }
+}
+
+const MAX_SERVER_MESSAGE_CHARS = 500
+
+/**
+ * The source refused or failed a query (bad SQL, a missing field, a server
+ * timeout). The message is written here or is the server's own description
+ * of the query's problem, which never carries credentials.
+ */
+export class SourceQueryError extends Error {
+  readonly timedOut: boolean
+
+  constructor(message: string, options: { timedOut?: boolean } = {}) {
+    super(message)
+    this.name = "SourceQueryError"
+    this.timedOut = options.timedOut ?? false
+  }
+
+  /** The server's description of what is wrong with a query, tidied and bounded. */
+  static fromServer(text: string): SourceQueryError {
+    const message = text.replaceAll("\u0000", "").trim().replace(/\.$/, "") || "The query failed"
+    const sentence = `${message.charAt(0).toUpperCase()}${message.slice(1)}`
+    return new SourceQueryError(
+      sentence.length > MAX_SERVER_MESSAGE_CHARS
+        ? `${sentence.slice(0, MAX_SERVER_MESSAGE_CHARS - 1)}…`
+        : `${sentence}.`,
+    )
   }
 }
 
@@ -163,6 +193,20 @@ export class DiscoveryLimitExceeded extends Error {
   }
 }
 
+/** A query that passed validation, ready to run on its engine. */
+export type ValidatedQuery = SqlQuery | ValidatedMongoQuery
+
+export interface QueryRunRequest {
+  query: ValidatedQuery
+  limits: QueryLimits
+  /** The source's selected schemas (MongoDB: databases), e.g. for PostgreSQL's search_path. */
+  schemas: string[]
+  /** Tags the query's server operations so they can be found and stopped. */
+  executionId: string
+  /** Aborting stops the query on the source, not just the wait for it. */
+  signal: AbortSignal
+}
+
 /**
  * One adapter per engine. `test` uses a short-lived connection for unsaved or
  * changed settings; saved sources run through a bounded per-connection pool
@@ -173,6 +217,12 @@ export interface SourceAdapter<Config> {
   listSchemas(source: SavedSource<Config>): Promise<string[]>
   /** Reads metadata for the requested schemas through the saved source's pool. */
   discover(source: SavedSource<Config>, request: DiscoveryRequest): Promise<DiscoveredMetadata>
+  /**
+   * Runs a validated read through the saved source's pool, bounded by the
+   * request's limits. Failures reject with SourceQueryError or
+   * SourceConnectionError; an abort rejects with the signal's reason.
+   */
+  runQuery(source: SavedSource<Config>, request: QueryRunRequest): Promise<QueryResult>
   evict(connectionId: string): Promise<void>
   close(): Promise<void>
 }

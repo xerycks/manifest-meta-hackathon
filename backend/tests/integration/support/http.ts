@@ -15,6 +15,8 @@ export interface RequestOptions {
   /** Set to false to send a mutation without the CSRF header. */
   csrf?: boolean
   headers?: Record<string, string>
+  /** Aborting it closes the request, as a browser does when the user leaves the page. */
+  signal?: AbortSignal
 }
 
 export interface SessionContext {
@@ -52,6 +54,7 @@ export class TestClient {
       headers,
       redirect: "manual",
       ...(options.json !== undefined ? { body: JSON.stringify(options.json) } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     })
     for (const raw of response.headers.getSetCookie()) {
       const [pair] = raw.split(";")

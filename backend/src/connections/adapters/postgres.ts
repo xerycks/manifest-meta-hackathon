@@ -4,9 +4,11 @@ import { Client, Pool, type ClientBase, type ClientConfig, type PoolClient } fro
 
 import type { PostgresConfig } from "../schemas.js"
 import { readPostgresMetadata } from "./postgres-discovery.js"
+import { readQueryRows } from "./postgres-query.js"
 import {
   DiscoveryLimitExceeded,
   SourceConnectionError,
+  SourceQueryError,
   type SavedSource,
   type SourceAdapter,
   type SourceSecret,
@@ -170,6 +172,34 @@ export function mapDiscoveryError(error: unknown): SourceConnectionError {
 }
 
 /**
+ * A query's own problems (unknown column, bad cast, permission denied) keep
+ * PostgreSQL's description of them; connection failures keep the shared mapping.
+ */
+export function mapQueryError(error: unknown): SourceQueryError | SourceConnectionError {
+  const code = errorCode(error)
+  const message = error instanceof Error ? error.message : ""
+  if (code === "57014") {
+    return /statement timeout/i.test(message)
+      ? new SourceQueryError("The query ran past its time limit.", { timedOut: true })
+      : new SourceQueryError("The query was cancelled on the source.")
+  }
+  if (code === "55P03") {
+    return new SourceQueryError(
+      "A table the query reads stayed locked (for example by a running migration). Try again when it is free.",
+    )
+  }
+  if (code === "25006") {
+    return new SourceQueryError("The query tried to write, but queries run in a read-only transaction.")
+  }
+  const connectionLevel = /^(08|28|57P)/.test(code) || code === "3D000"
+  if (/^[0-9A-Z]{5}$/.test(code) && !connectionLevel) {
+    const hint = (error as { hint?: unknown }).hint
+    return SourceQueryError.fromServer(typeof hint === "string" ? `${message}. ${hint}` : message)
+  }
+  return mapPostgresError(error)
+}
+
+/**
  * Runs `work` on `client`; aborting `signal` cancels whatever query the
  * client's server process is running, so a slow read also stops on the source.
  */
@@ -319,6 +349,41 @@ export function createPostgresAdapter(): SourceAdapter<PostgresConfig> {
         throw mapDiscoveryError(error)
       } finally {
         // A failed or cancelled session may sit mid-transaction: discard it instead of reusing it.
+        client.release(!reusable)
+      }
+    },
+
+    async runQuery(source, request) {
+      const { query, signal } = request
+      if (query.language !== "sql") throw new Error("PostgreSQL sources run SQL queries only")
+      signal.throwIfAborted()
+      let client: PoolClient
+      try {
+        client = await poolFor(source).connect()
+      } catch (error) {
+        throw mapPostgresError(error)
+      }
+      // A session that dies mid-query (closed for size, ended by the server) also
+      // rejects the running call; without a listener its error event would crash the process.
+      const ignore = () => {}
+      client.on("error", ignore)
+      let reusable = false
+      try {
+        const result = await withCancellation(
+          client,
+          signal,
+          (pid) => cancelBackend(source, pid),
+          () => readQueryRows(client, query, request),
+        )
+        signal.throwIfAborted()
+        reusable = true
+        return result
+      } catch (error) {
+        signal.throwIfAborted()
+        throw error instanceof SourceQueryError ? error : mapQueryError(error)
+      } finally {
+        client.removeListener("error", ignore)
+        // A failed, timed-out, or cancelled session may sit mid-transaction: discard it.
         client.release(!reusable)
       }
     },

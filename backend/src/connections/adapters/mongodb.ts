@@ -1,10 +1,13 @@
 import { MongoClient, type MongoClientOptions } from "mongodb"
 
+import { QUERY_LIMITS } from "../../queries/schemas.js"
 import { isSystemDatabase, type MongoConfig } from "../schemas.js"
 import { OPERATION_MAX_TIME_MS, readMongoMetadata } from "./mongodb-discovery.js"
+import { readMongoRows } from "./mongodb-query.js"
 import {
   DiscoveryLimitExceeded,
   SourceConnectionError,
+  SourceQueryError,
   type SavedSource,
   type SourceAdapter,
   type SourceSecret,
@@ -13,8 +16,8 @@ import {
 const APP_NAME = "manifest-source"
 const CONNECT_TIMEOUT_MS = 5_000
 const SERVER_SELECTION_TIMEOUT_MS = 5_000
-/** A client-side bound above maxTimeMS, in case a stalled server never answers. */
-const SOCKET_TIMEOUT_MS = OPERATION_MAX_TIME_MS + 5_000
+/** A client-side bound above the longest maxTimeMS (a query's), in case a server never answers. */
+const SOCKET_TIMEOUT_MS = Math.max(OPERATION_MAX_TIME_MS, QUERY_LIMITS.maxTimeoutMs) + 5_000
 const MAX_POOL_SIZE = 3
 const MAX_IDLE_TIME_MS = 30_000
 /** Clients kept per process; the least recently used one closes beyond this. */
@@ -23,6 +26,7 @@ const MAX_DATABASES = 1_000
 
 const UNAUTHORIZED = 13
 const AUTHENTICATION_FAILED = 18
+const MAX_TIME_EXPIRED = 50
 
 /** Shared by test and saved-source clients; these override anything a connection string sets. */
 const BASE_OPTIONS: MongoClientOptions = {
@@ -198,6 +202,23 @@ export function mapMongoDiscoveryError(error: unknown): SourceConnectionError {
   return mapMongoError(error)
 }
 
+/**
+ * A query's own problems (unknown operator, bad expression) keep the server's
+ * description of them; connection failures keep the shared mapping.
+ */
+export function mapMongoQueryError(error: unknown): SourceQueryError | SourceConnectionError {
+  if (!(error instanceof Error) || error.name !== "MongoServerError") return mapMongoError(error)
+  const code = Number((error as { code?: unknown }).code)
+  if (code === MAX_TIME_EXPIRED) {
+    return new SourceQueryError("The query ran past its time limit.", { timedOut: true })
+  }
+  if (code === UNAUTHORIZED) {
+    return new SourceQueryError("The source user may not read this collection or run this query.")
+  }
+  if (code === AUTHENTICATION_FAILED) return mapMongoError(error)
+  return SourceQueryError.fromServer(error.message)
+}
+
 /** A driver-level admin client, so tests can stand in for it. */
 export interface DatabaseLister {
   db(name: string): { command(command: Record<string, unknown>): Promise<Record<string, unknown>> }
@@ -317,6 +338,19 @@ export function createMongoAdapter(): SourceAdapter<MongoConfig> {
           throw error
         }
         throw mapMongoDiscoveryError(error)
+      }
+    },
+
+    async runQuery(source, request) {
+      const { query, signal } = request
+      if (query.language !== "mongodb") throw new Error("MongoDB sources run find and aggregate only")
+      signal.throwIfAborted()
+      try {
+        return await readMongoRows(clientFor(source), query, request)
+      } catch (error) {
+        signal.throwIfAborted()
+        if (error instanceof SourceQueryError || error instanceof SourceConnectionError) throw error
+        throw mapMongoQueryError(error)
       }
     },
 

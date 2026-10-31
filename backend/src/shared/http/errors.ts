@@ -9,6 +9,8 @@ export type ErrorCode =
   | "STORAGE_NOT_CONFIGURED"
   | "CONNECTIONS_NOT_CONFIGURED"
   | "SOURCE_CONNECTION_FAILED"
+  | "QUERY_REJECTED"
+  | "QUERY_BUSY"
   | "GOOGLE_SIGN_IN_UNAVAILABLE"
   | "INTERNAL_ERROR"
 
@@ -16,13 +18,22 @@ export class AppError extends Error {
   readonly status: number
   readonly code: ErrorCode
   readonly details: unknown
+  /** Extra response headers, e.g. Retry-After. */
+  readonly headers: Record<string, string>
 
-  constructor(status: number, code: ErrorCode, message: string, details?: unknown) {
+  constructor(
+    status: number,
+    code: ErrorCode,
+    message: string,
+    details?: unknown,
+    headers: Record<string, string> = {},
+  ) {
     super(message)
     this.name = "AppError"
     this.status = status
     this.code = code
     this.details = details
+    this.headers = headers
   }
 
   static badRequest(message: string, details?: unknown): AppError {
@@ -81,6 +92,21 @@ export class AppError extends Error {
       "CONNECTIONS_NOT_CONFIGURED",
       "Source connections are not configured. Set CONNECTION_ENCRYPTION_KEY (openssl rand -hex 32) and restart the backend.",
     )
+  }
+
+  /** Validation refused a query; details name the reason, the offending name, and the recorded execution. */
+  static queryRejected(
+    message: string,
+    details: { executionId: string; reason: string | null; name: string | null },
+  ): AppError {
+    return new AppError(422, "QUERY_REJECTED", message, details)
+  }
+
+  /** Too many queries are running; the request was not started and may be retried. */
+  static queryBusy(message: string, retryAfterSeconds: number): AppError {
+    return new AppError(429, "QUERY_BUSY", message, { retryAfterSeconds }, {
+      "Retry-After": String(retryAfterSeconds),
+    })
   }
 
   /** A source database could not be reached or used; `reason` is a stable machine code. */

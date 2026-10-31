@@ -253,10 +253,11 @@ async function profileCollection(
 }
 
 /**
- * Kills this run's operations that are still running on the server. Aborting
- * only stops the driver waiting; any user may list and kill its own operations.
+ * Kills the operations tagged with `comment` that are still running on the
+ * server. Aborting only stops the driver waiting; any user may list and kill
+ * its own operations.
  */
-async function killOperations(client: MongoClient, comment: string): Promise<void> {
+export async function killOperations(client: MongoClient, comment: string): Promise<void> {
   const admin = client.db("admin")
   const { inprog } = await admin.command({
     currentOp: 1,

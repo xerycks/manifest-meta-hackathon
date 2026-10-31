@@ -27,6 +27,10 @@ import { ManifestsRepository } from "../manifests/repository.js"
 import { manifestsRouter, type ManifestsDeps } from "../manifests/routes.js"
 import { RefreshRunner } from "../manifests/runner.js"
 import { ManifestsService } from "../manifests/service.js"
+import { QueryExecutionsRepository } from "../queries/repository.js"
+import { queriesRouter, type QueriesDeps } from "../queries/routes.js"
+import { QueryRunner } from "../queries/runner.js"
+import { QueryExecutor } from "../queries/service.js"
 import { SearchRepository } from "../search/repository.js"
 import { searchRouter, type SearchDeps } from "../search/routes.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
@@ -49,6 +53,8 @@ export interface AppDeps {
   sources?: SourceAdapters
   /** Background manifest refreshes; pass it in to stop them on shutdown. */
   refreshes?: RefreshRunner
+  /** Running source queries; pass it in to abort them on shutdown. */
+  queries?: QueryRunner
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
@@ -65,6 +71,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let manifestsDeps: ManifestsDeps | null = null
   let knowledgeDeps: KnowledgeDeps | null = null
   let searchDeps: SearchDeps | null = null
+  let queriesDeps: QueriesDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
     const workspaces = new WorkspacesRepository(pool)
@@ -100,12 +107,9 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
           deps.sources ?? createSourceAdapters(),
         )
       : null
+    const manifestsRepository = new ManifestsRepository(pool)
     const manifests = connections
-      ? new ManifestsService(
-          new ManifestsRepository(pool),
-          connections,
-          deps.refreshes ?? new RefreshRunner(),
-        )
+      ? new ManifestsService(manifestsRepository, connections, deps.refreshes ?? new RefreshRunner())
       : null
     connectionsDeps = {
       workspaces,
@@ -130,6 +134,19 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       knowledge: new KnowledgeService(new KnowledgeRepository(pool), connectionsRepository),
     }
     searchDeps = { workspaces, auth, search: new SearchRepository(pool) }
+    queriesDeps = {
+      workspaces,
+      auth,
+      sessionSecret,
+      executor: connections
+        ? new QueryExecutor(
+            new QueryExecutionsRepository(pool),
+            connections,
+            manifestsRepository,
+            deps.queries ?? new QueryRunner(),
+          )
+        : null,
+    }
   }
 
   app.disable("x-powered-by")
@@ -156,6 +173,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", manifestsRouter(manifestsDeps))
   app.use("/api/v1", knowledgeRouter(knowledgeDeps))
   app.use("/api/v1", searchRouter(searchDeps))
+  app.use("/api/v1", queriesRouter(queriesDeps))
 
   app.use(notFoundHandler)
   app.use(errorHandler)

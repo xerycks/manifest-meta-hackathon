@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 
+import type { QueryResult } from "../queries/schemas.js"
 import { AppError } from "../shared/http/errors.js"
 import { isUniqueViolation } from "../shared/postgres/errors.js"
 import { withAdapter } from "./adapters/index.js"
@@ -8,6 +9,7 @@ import {
   SourceConnectionError,
   type DiscoveredMetadata,
   type DiscoveryRequest,
+  type QueryRunRequest,
   type SourceAdapters,
   type SourceSecret,
   type SourceTestResult,
@@ -309,6 +311,25 @@ export class ConnectionsService {
     return withAdapter(this.adapters, connection, (adapter, config) =>
       adapter.discover(savedSource(connection, config, secret), {
         ...options,
+        schemas: connection.schemas,
+      }),
+    )
+  }
+
+  /**
+   * Runs a validated read query through the source's pool, with its currently
+   * selected schemas. Source problems reject with SourceQueryError or
+   * SourceConnectionError; an abort rejects with the signal's reason.
+   */
+  async runQuery(
+    workspaceId: string,
+    id: string,
+    request: Omit<QueryRunRequest, "schemas">,
+  ): Promise<QueryResult> {
+    const { connection, secret } = await this.resolve(workspaceId, id)
+    return withAdapter(this.adapters, connection, (adapter, config) =>
+      adapter.runQuery(savedSource(connection, config, secret), {
+        ...request,
         schemas: connection.schemas,
       }),
     )
