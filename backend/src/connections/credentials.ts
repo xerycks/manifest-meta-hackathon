@@ -14,7 +14,7 @@ export interface SealBinding {
   connectionId: string
 }
 
-const secretSchema = z.strictObject({ password: z.string().optional() })
+const secretSchema = z.strictObject({ password: z.string().optional(), uri: z.string().optional() })
 
 export class CredentialsUnreadable extends Error {
   constructor() {
@@ -66,7 +66,10 @@ export class CredentialSealer {
         decipher.final(),
       ]).toString("utf8")
       const parsed = secretSchema.parse(JSON.parse(plaintext))
-      return parsed.password === undefined ? {} : { password: parsed.password }
+      return {
+        ...(parsed.password !== undefined ? { password: parsed.password } : {}),
+        ...(parsed.uri !== undefined ? { uri: parsed.uri } : {}),
+      }
     } catch {
       throw new CredentialsUnreadable()
     }

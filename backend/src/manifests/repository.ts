@@ -96,7 +96,7 @@ const UPSERT_OBJECTS_SQL = `
   WITH incoming AS (
     SELECT * FROM jsonb_to_recordset($3::jsonb) AS o(
       schema_name text, object_name text, kind text, source_comment text,
-      estimated_rows bigint, view_definition text)
+      estimated_rows bigint, view_definition text, details jsonb)
   ),
   previous AS (
     SELECT m.id, m.present
@@ -107,14 +107,16 @@ const UPSERT_OBJECTS_SQL = `
   upserted AS (
     INSERT INTO manifest_objects AS m
       (workspace_id, connection_id, schema_name, object_name, kind, source_comment,
-       estimated_rows, view_definition)
-    SELECT $1, $2, schema_name, object_name, kind, source_comment, estimated_rows, view_definition
+       estimated_rows, view_definition, details)
+    SELECT $1, $2, schema_name, object_name, kind, source_comment, estimated_rows, view_definition,
+           details
       FROM incoming
     ON CONFLICT (connection_id, schema_name, object_name) DO UPDATE SET
       kind = EXCLUDED.kind,
       source_comment = EXCLUDED.source_comment,
       estimated_rows = EXCLUDED.estimated_rows,
       view_definition = EXCLUDED.view_definition,
+      details = EXCLUDED.details,
       present = true,
       removed_at = NULL,
       last_seen_at = now()
@@ -128,7 +130,8 @@ const UPSERT_COLUMNS_SQL = `
   WITH incoming AS (
     SELECT * FROM jsonb_to_recordset($1::jsonb) AS c(
       object_id uuid, name text, ordinal integer, data_type text, is_nullable boolean,
-      default_value text, is_primary_key boolean, enum_values text[], source_comment text)
+      default_value text, is_primary_key boolean, enum_values text[], source_comment text,
+      details jsonb)
   ),
   previous AS (
     SELECT m.id, m.present
@@ -138,9 +141,9 @@ const UPSERT_COLUMNS_SQL = `
   upserted AS (
     INSERT INTO manifest_columns AS m
       (object_id, name, ordinal, data_type, is_nullable, default_value, is_primary_key,
-       enum_values, source_comment)
+       enum_values, source_comment, details)
     SELECT object_id, name, ordinal, data_type, is_nullable, default_value, is_primary_key,
-           enum_values, source_comment
+           enum_values, source_comment, details
       FROM incoming
     ON CONFLICT (object_id, name) DO UPDATE SET
       ordinal = EXCLUDED.ordinal,
@@ -150,6 +153,7 @@ const UPSERT_COLUMNS_SQL = `
       is_primary_key = EXCLUDED.is_primary_key,
       enum_values = EXCLUDED.enum_values,
       source_comment = EXCLUDED.source_comment,
+      details = EXCLUDED.details,
       present = true,
       removed_at = NULL,
       last_seen_at = now()
@@ -180,11 +184,13 @@ const MARK_MISSING_OBJECTS_SQL = `
    WHERE workspace_id = $1 AND connection_id = $2
      AND present AND last_seen_at IS DISTINCT FROM now()`
 
+// Objects whose columns could not be read this time ($3) keep the ones already published.
 const MARK_MISSING_COLUMNS_SQL = `
   UPDATE manifest_columns c SET present = false, removed_at = now()
     FROM manifest_objects o
    WHERE c.object_id = o.id AND o.workspace_id = $1 AND o.connection_id = $2
-     AND c.present AND c.last_seen_at IS DISTINCT FROM now()`
+     AND c.present AND c.last_seen_at IS DISTINCT FROM now()
+     AND NOT (c.object_id = ANY ($3::uuid[]))`
 
 // Manual relationships are user-authored and never marked missing by discovery.
 const MARK_MISSING_RELATIONSHIPS_SQL = `
@@ -382,6 +388,7 @@ export class ManifestsRepository {
         source_comment: object.comment,
         estimated_rows: object.estimatedRows,
         view_definition: object.viewDefinition,
+        details: object.details,
       }))
       const { rows } = await client.query<{
         id: string
@@ -408,6 +415,7 @@ export class ManifestsRepository {
         is_primary_key: column.isPrimaryKey,
         enum_values: column.enumValues,
         source_comment: column.comment,
+        details: column.details,
       }))
     })
     let columnsAdded = 0
@@ -417,7 +425,12 @@ export class ManifestsRepository {
       ])
       columnsAdded += rows[0]?.added ?? 0
     }
-    const columnsRemoved = (await client.query(MARK_MISSING_COLUMNS_SQL, scope)).rowCount ?? 0
+    const kept = metadata.objects.flatMap((object) => {
+      const id = object.keepColumns ? objectIds.get(objectKey(object.schema, object.name)) : undefined
+      return id ? [id] : []
+    })
+    const columnsRemoved =
+      (await client.query(MARK_MISSING_COLUMNS_SQL, [...scope, kept])).rowCount ?? 0
 
     const relationships = metadata.relationships.flatMap((relationship) => {
       const from = objectIds.get(objectKey(relationship.from.schema, relationship.from.name))

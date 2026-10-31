@@ -268,6 +268,7 @@ export function createPostgresAdapter(): SourceAdapter<PostgresConfig> {
           serverVersion: version.rows[0]?.version ?? "unknown",
           latencyMs,
           schemas: schemas.rows.map((row) => row.name),
+          schemaListLimited: false,
         }
       } catch (error) {
         throw mapPostgresError(error)

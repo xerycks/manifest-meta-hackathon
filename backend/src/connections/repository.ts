@@ -1,21 +1,27 @@
 import type { Pool } from "pg"
 
-import type { ConnectionStatus, Engine, PostgresConfig } from "./schemas.js"
+import { capabilitiesFor, type SourceCapabilities } from "./capabilities.js"
+import type { ConnectionStatus, Engine, MongoConfig, PostgresConfig, SourceSettings } from "./schemas.js"
 
-/** The public shape of a saved connection. It never includes the sealed secret. */
-export interface Connection {
+/**
+ * The public shape of a saved connection. It never includes the sealed
+ * secret: `hasPassword` says one is saved (for MongoDB connection-string
+ * sources, the connection string), and a connection string's config holds
+ * only its hosts and database.
+ */
+export type Connection = SourceSettings & {
   id: string
   workspaceId: string
   name: string
-  engine: Engine
-  config: PostgresConfig
   hasPassword: boolean
+  /** PostgreSQL schemas or MongoDB databases. */
   schemas: string[]
   status: ConnectionStatus
   lastTestedAt: string | null
   lastError: string | null
   createdAt: string
   updatedAt: string
+  capabilities: SourceCapabilities
 }
 
 interface ConnectionRow {
@@ -23,7 +29,7 @@ interface ConnectionRow {
   workspace_id: string
   name: string
   engine: Engine
-  config: PostgresConfig
+  config: PostgresConfig | MongoConfig
   has_password: boolean
   selected_schemas: string[]
   status: ConnectionStatus
@@ -37,12 +43,13 @@ const COLUMNS = `id, workspace_id, name, engine, config, sealed_secret IS NOT NU
   selected_schemas, status, last_tested_at, last_error, created_at, updated_at`
 
 function toConnection(row: ConnectionRow): Connection {
+  // The engine CHECK and the service keep each row's config in its engine's shape.
+  const settings = { engine: row.engine, config: row.config } as SourceSettings
   return {
     id: row.id,
     workspaceId: row.workspace_id,
     name: row.name,
-    engine: row.engine,
-    config: row.config,
+    ...settings,
     hasPassword: row.has_password,
     schemas: row.selected_schemas,
     status: row.status,
@@ -50,6 +57,7 @@ function toConnection(row: ConnectionRow): Connection {
     lastError: row.last_error,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    capabilities: capabilitiesFor(row.engine),
   }
 }
 
@@ -101,16 +109,16 @@ export class ConnectionsRepository {
   }
 
   /** Inserts a connection that has just passed a connection test. */
-  async insert(input: {
-    id: string
-    workspaceId: string
-    name: string
-    engine: Engine
-    config: PostgresConfig
-    sealedSecret: string | null
-    schemas: string[]
-    createdBy: string
-  }): Promise<Connection> {
+  async insert(
+    input: SourceSettings & {
+      id: string
+      workspaceId: string
+      name: string
+      sealedSecret: string | null
+      schemas: string[]
+      createdBy: string
+    },
+  ): Promise<Connection> {
     const { rows } = await this.pool.query<ConnectionRow>(
       `INSERT INTO connections
          (id, workspace_id, name, engine, config, sealed_secret, selected_schemas,
@@ -133,14 +141,17 @@ export class ConnectionsRepository {
     return connection
   }
 
-  /** Applies the given changes; `tested` records the successful test that preceded them. */
+  /**
+   * Applies the given changes; `tested` records the successful test that
+   * preceded them. A `sealedSecret` of null removes the saved one.
+   */
   async update(
     workspaceId: string,
     id: string,
     changes: {
       name?: string
-      config?: PostgresConfig
-      sealedSecret?: string
+      config?: PostgresConfig | MongoConfig
+      sealedSecret?: string | null
       schemas?: string[]
       tested: boolean
     },
@@ -149,7 +160,7 @@ export class ConnectionsRepository {
       `UPDATE connections SET
          name = COALESCE($3, name),
          config = COALESCE($4::jsonb, config),
-         sealed_secret = COALESCE($5, sealed_secret),
+         sealed_secret = CASE WHEN $8 THEN $5 ELSE sealed_secret END,
          selected_schemas = COALESCE($6::text[], selected_schemas),
          status = CASE WHEN $7 THEN 'connected' ELSE status END,
          last_error = CASE WHEN $7 THEN NULL ELSE last_error END,
@@ -165,6 +176,7 @@ export class ConnectionsRepository {
         changes.sealedSecret ?? null,
         changes.schemas ?? null,
         changes.tested,
+        changes.sealedSecret !== undefined,
       ],
     )
     return firstRow(rows)

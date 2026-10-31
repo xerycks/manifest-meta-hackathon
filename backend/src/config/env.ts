@@ -29,6 +29,11 @@ const envSchema = z
 
     // Synthetic demo source built by `npm run db:demo-source` (local only).
     DEMO_SOURCE_DATABASE_URL: z.string().url().optional(),
+    // Synthetic MongoDB demo database built by `npm run db:demo-mongo` (local only).
+    DEMO_MONGO_URL: z
+      .string()
+      .regex(/^mongodb(\+srv)?:\/\//, "must start with mongodb:// or mongodb+srv://")
+      .optional(),
 
     // Browser sessions (Cycle 04). Required in production when storage is on;
     // locally an ephemeral secret is generated and sessions reset on restart.

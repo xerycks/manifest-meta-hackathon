@@ -173,6 +173,7 @@ before(async () => {
   consoleCapture = captureConsole()
   realSources = createSourceAdapters()
   const sources: SourceAdapters = {
+    ...realSources,
     postgres: {
       ...realSources.postgres,
       discover: (saved, request) =>

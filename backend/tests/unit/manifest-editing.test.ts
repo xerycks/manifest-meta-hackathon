@@ -25,6 +25,21 @@ test("type families ignore modifiers and widths but keep arrays apart", () => {
   assert.equal(typeFamily(column("shop.gift_wrap", ["none", "box"])), "text")
 })
 
+test("MongoDB field types: nulls ignored, arrays match their elements, mixes stay mixed", () => {
+  assert.equal(typeFamily(column("int")), "number")
+  assert.equal(typeFamily(column("long | null")), "number")
+  assert.equal(typeFamily(column("int | double")), "number")
+  assert.equal(typeFamily(column("string")), "text")
+  assert.equal(typeFamily(column("objectId")), "objectid")
+  assert.equal(typeFamily(column("array<int> | null")), "number")
+  assert.equal(typeFamily(column("int | string")), "number | text")
+  assert.equal(typeFamily(column("array<int | string>")), "number | text")
+  assert.ok(typesCompatible(column("int"), column("array<long>")))
+  assert.ok(typesCompatible(column("objectId"), column("objectId | null")))
+  assert.ok(!typesCompatible(column("objectId"), column("string")))
+  assert.ok(!typesCompatible(column("int | string"), column("int")))
+})
+
 test("relationships need comparable column types", () => {
   assert.ok(typesCompatible(column("integer"), column("bigint")))
   assert.ok(typesCompatible(column("text"), column("character varying(40)")))

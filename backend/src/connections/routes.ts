@@ -139,7 +139,8 @@ export function connectionsRouter(deps: ConnectionsDeps | null): Router {
       const input = req.body as UpdateConnectionInput
       const workspaceId = currentWorkspace(req).id
       const connection = await service.update(workspaceId, connectionId(req.params), input)
-      if (input.schemas !== undefined || input.config !== undefined) {
+      // A new MongoDB connection string can point at another server, like changed settings.
+      if (input.schemas !== undefined || input.config !== undefined || input.uri !== undefined) {
         await deps.onSourceSaved?.({
           workspaceId,
           connectionId: connection.id,

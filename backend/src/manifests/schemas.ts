@@ -1,7 +1,12 @@
 import { z } from "zod"
 
 import type { Author } from "../auth/repository.js"
-import type { DiscoveryPhase, ManifestObjectKind } from "../connections/adapters/types.js"
+import type {
+  DiscoveryPhase,
+  ManifestObjectKind,
+  MongoCollectionDetails,
+  MongoFieldDetails,
+} from "../connections/adapters/types.js"
 
 export type RefreshStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled"
 export type RefreshTrigger = "manual" | "source_created" | "source_changed"
@@ -70,6 +75,8 @@ export interface ManifestObject {
   removedAt: string | null
   firstSeenAt: string
   lastSeenAt: string
+  /** Engine-specific facts from discovery (MongoDB: how the collection was sampled). */
+  details: MongoCollectionDetails | null
   // Authored meaning; refreshes never change it.
   label: string | null
   /** Markdown. */
@@ -95,6 +102,8 @@ export interface ManifestColumn {
   comment: string | null
   present: boolean
   removedAt: string | null
+  /** Engine-specific facts from discovery (MongoDB: the sampled type mix and presence). */
+  details: MongoFieldDetails | null
   // Authored meaning; refreshes never change it.
   label: string | null
   /** Markdown. */

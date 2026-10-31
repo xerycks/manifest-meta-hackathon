@@ -1,6 +1,7 @@
 import type { ClientBase } from "pg"
 
 import {
+  DISCOVERY_LIMITS,
   DiscoveryLimitExceeded,
   type DiscoveredColumn,
   type DiscoveredMetadata,
@@ -8,9 +9,6 @@ import {
   type DiscoveryRequest,
   type ManifestObjectKind,
 } from "./types.js"
-
-/** Caps per refresh: beyond them a refresh fails with a clear message instead of publishing part. */
-export const DISCOVERY_LIMITS = { objects: 2_000, columns: 50_000, relationships: 10_000 } as const
 
 /** Objects whose columns are read per query, which is also the progress granularity. */
 const COLUMN_BATCH_SIZE = 200
@@ -179,6 +177,7 @@ export async function readPostgresMetadata(
         isPrimaryKey: row.is_primary_key,
         enumValues: row.enum_values,
         comment: row.comment,
+        details: null,
       })
     }
     await onProgress({
@@ -212,6 +211,8 @@ export async function readPostgresMetadata(
     estimatedRows: row.estimated_rows === null ? null : Number(row.estimated_rows),
     viewDefinition: row.view_definition,
     columns: columnsByOid.get(row.oid) ?? [],
+    keepColumns: false,
+    details: null,
   }))
   const relationships = relationshipRows.flatMap((row) => {
     const from = byOid.get(row.from_oid)

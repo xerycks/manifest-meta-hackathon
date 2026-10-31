@@ -21,6 +21,14 @@ test("sealed secrets round-trip and never contain the plaintext", () => {
   assert.notEqual(sealer.seal({ password: PASSWORD }, BINDING), sealed)
 })
 
+test("a MongoDB connection string is sealed like a password", () => {
+  const sealer = new CredentialSealer(KEY)
+  const uri = "mongodb://reader:hunter2@db.internal:27017/events"
+  const sealed = sealer.seal({ uri }, BINDING)
+  assert.ok(!sealed.includes("hunter2") && !sealed.includes("db.internal"))
+  assert.deepEqual(sealer.open(sealed, BINDING), { uri })
+})
+
 test("tampered envelopes fail closed", () => {
   const sealer = new CredentialSealer(KEY)
   const sealed = sealer.seal({ password: PASSWORD }, BINDING)

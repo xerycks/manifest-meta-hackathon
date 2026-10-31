@@ -80,23 +80,51 @@ export type UpdateRelationshipInput = z.infer<typeof updateRelationshipSchema>
 const TYPE_FAMILIES: [family: string, pattern: RegExp][] = [
   [
     "number",
-    /^(smallint|integer|bigint|int[248]?|numeric|decimal|real|double precision|float[48]?|money|oid)\b/,
+    /^(smallint|integer|bigint|int[248]?|long|numeric|decimal|real|double|float[48]?|money|oid)\b/,
   ],
-  ["text", /^(text|character varying|varchar|character|char|bpchar|citext|name)\b/],
+  ["text", /^(text|character varying|varchar|character|char|bpchar|citext|name|string)\b/],
   ["timestamp", /^(timestamp|date)\b/],
   ["time", /^time\b/],
   ["json", /^jsonb?\b/],
 ]
 
+/** Splits "int | array<string | int> | null" at its top-level separators. */
+function typeAlternatives(type: string): string[] {
+  const parts: string[] = []
+  let depth = 0
+  let start = 0
+  for (let index = 0; index < type.length; index += 1) {
+    const char = type[index]
+    if (char === "<") depth += 1
+    else if (char === ">") depth -= 1
+    else if (char === "|" && depth === 0) {
+      parts.push(type.slice(start, index).trim())
+      start = index + 1
+    }
+  }
+  parts.push(type.slice(start).trim())
+  return parts
+}
+
 /**
- * A coarse family for a PostgreSQL type as discovery formats it (modifiers
- * like varchar(80) and numeric(12,2) ignored). Enums compare as text; arrays
- * only match arrays of the same family.
+ * A coarse family for a column type as discovery formats it (modifiers like
+ * varchar(80) and numeric(12,2) ignored). Enums compare as text; PostgreSQL
+ * arrays only match arrays of the same family. MongoDB fields list every type
+ * seen: nulls are ignored, and an array matches its elements' family because
+ * MongoDB lookups match array elements.
  */
 export function typeFamily(column: { dataType: string; enumValues: string[] | null }): string {
   const type = column.dataType.trim().toLowerCase()
-  const array = type.endsWith("[]")
-  const base = array ? type.slice(0, -2) : type
+  const alternatives = typeAlternatives(type).filter((part) => part !== "null" && part !== "undefined")
+  if (alternatives.length !== 1) {
+    const families = alternatives.map((part) => typeFamily({ dataType: part, enumValues: null }))
+    return [...new Set(families)].sort().join(" | ") || "null"
+  }
+  const single = alternatives[0] as string
+  const elements = /^array<(.+)>$/.exec(single)?.[1]
+  if (elements) return typeFamily({ dataType: elements, enumValues: null })
+  const array = single.endsWith("[]")
+  const base = array ? single.slice(0, -2) : single
   const family =
     column.enumValues !== null
       ? "text"

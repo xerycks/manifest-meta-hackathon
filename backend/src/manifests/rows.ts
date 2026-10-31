@@ -1,5 +1,9 @@
 import { authorNameSql, toAuthor } from "../auth/repository.js"
-import type { ManifestObjectKind } from "../connections/adapters/types.js"
+import type {
+  ManifestObjectKind,
+  MongoCollectionDetails,
+  MongoFieldDetails,
+} from "../connections/adapters/types.js"
 import type { ManifestColumn, ManifestObject, ManifestRelationship } from "./schemas.js"
 
 // Row shapes and SELECTs shared by the browse and edit repositories. Each
@@ -18,6 +22,7 @@ export interface ObjectRow {
   removed_at: Date | null
   first_seen_at: Date
   last_seen_at: Date
+  details: MongoCollectionDetails | null
   label: string | null
   description: string | null
   row_meaning: string | null
@@ -31,7 +36,7 @@ export interface ObjectRow {
 export const OBJECT_SELECT = `
   SELECT o.id, o.connection_id, o.schema_name, o.object_name, o.kind, o.source_comment,
          o.estimated_rows, o.view_definition, o.present, o.removed_at, o.first_seen_at,
-         o.last_seen_at, o.label, o.description, o.row_meaning, o.version, o.edited_at,
+         o.last_seen_at, o.details, o.label, o.description, o.row_meaning, o.version, o.edited_at,
          o.edited_by, ${authorNameSql("ou")} AS edited_by_name
     FROM manifest_objects o
     LEFT JOIN users ou ON ou.id = o.edited_by`
@@ -53,6 +58,7 @@ export function toObject(row: ObjectRow): ManifestObject {
     removedAt: row.removed_at?.toISOString() ?? null,
     firstSeenAt: row.first_seen_at.toISOString(),
     lastSeenAt: row.last_seen_at.toISOString(),
+    details: row.details,
     label: row.label,
     description: row.description,
     rowMeaning: row.row_meaning,
@@ -75,6 +81,7 @@ export interface ColumnRow {
   source_comment: string | null
   present: boolean
   removed_at: Date | null
+  details: MongoFieldDetails | null
   label: string | null
   description: string | null
   unit: string | null
@@ -88,7 +95,7 @@ export interface ColumnRow {
 /** Alias `c`, joined to its object as `o` so callers can scope by workspace and connection. */
 export const COLUMN_SELECT = `
   SELECT c.id, c.object_id, c.name, c.ordinal, c.data_type, c.is_nullable, c.default_value,
-         c.is_primary_key, c.enum_values, c.source_comment, c.present, c.removed_at, c.label,
+         c.is_primary_key, c.enum_values, c.source_comment, c.present, c.removed_at, c.details, c.label,
          c.description, c.unit, c.value_notes, c.version, c.edited_at, c.edited_by,
          ${authorNameSql("cu")} AS edited_by_name
     FROM manifest_columns c
@@ -109,6 +116,7 @@ export function toColumn(row: ColumnRow): ManifestColumn {
     comment: row.source_comment,
     present: row.present,
     removedAt: row.removed_at?.toISOString() ?? null,
+    details: row.details,
     label: row.label,
     description: row.description,
     unit: row.unit,
