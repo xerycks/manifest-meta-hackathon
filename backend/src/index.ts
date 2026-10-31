@@ -1,5 +1,7 @@
 import { loadEnv } from "./config/env.js"
 import { closeSourceAdapters, createSourceAdapters } from "./connections/adapters/index.js"
+import { ManifestsRepository } from "./manifests/repository.js"
+import { RefreshRunner } from "./manifests/runner.js"
 import { createApp } from "./server/app.js"
 import { createPool } from "./shared/postgres/client.js"
 import { runMigrations } from "./storage/migrations.js"
@@ -10,6 +12,8 @@ const pool = env.DATABASE_URL ? createPool(env.DATABASE_URL) : null
 if (pool) {
   const applied = await runMigrations(pool)
   if (applied.length > 0) console.log(`Applied migrations: ${applied.join(", ")}`)
+  const interrupted = await new ManifestsRepository(pool).failInterruptedRefreshes()
+  if (interrupted > 0) console.warn(`Marked ${interrupted} interrupted manifest refresh(es) as failed.`)
   if (!env.CONNECTION_ENCRYPTION_KEY) {
     console.warn("CONNECTION_ENCRYPTION_KEY is not set — source connection endpoints will return 503.")
   }
@@ -18,7 +22,8 @@ if (pool) {
 }
 
 const sources = createSourceAdapters()
-const app = createApp(env, { pool, sources })
+const refreshes = new RefreshRunner()
+const app = createApp(env, { pool, sources, refreshes })
 
 const server = app.listen(env.PORT, env.HOST, () => {
   console.log(`manifest-backend listening on http://${env.HOST}:${env.PORT}`)
@@ -26,10 +31,12 @@ const server = app.listen(env.PORT, env.HOST, () => {
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
+    // Running refreshes stop now and record why; pools close once they have.
+    const stopped = refreshes.shutdown()
     server.close(() => {
-      void Promise.allSettled([closeSourceAdapters(sources), pool?.end()]).finally(() =>
-        process.exit(0),
-      )
+      void stopped
+        .then(() => Promise.allSettled([closeSourceAdapters(sources), pool?.end()]))
+        .finally(() => process.exit(0))
     })
   })
 }

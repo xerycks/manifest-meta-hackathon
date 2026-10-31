@@ -1,9 +1,11 @@
 import type { ConnectionOptions } from "node:tls"
 
-import { Client, Pool, type ClientConfig } from "pg"
+import { Client, Pool, type ClientBase, type ClientConfig, type PoolClient } from "pg"
 
 import type { PostgresConfig } from "../schemas.js"
+import { readPostgresMetadata } from "./postgres-discovery.js"
 import {
+  DiscoveryLimitExceeded,
   SourceConnectionError,
   type SavedSource,
   type SourceAdapter,
@@ -19,6 +21,9 @@ const POOL_IDLE_TIMEOUT_MS = 30_000
 /** Pools kept per process; the least recently used one closes beyond this. */
 const MAX_POOLS = 20
 const MAX_SCHEMAS = 1_000
+/** Discovery waits at most this long for a table locked by DDL (e.g. a migration) on the source. */
+const DISCOVERY_LOCK_TIMEOUT_MS = 10_000
+const CANCEL_TIMEOUT_MS = 5_000
 
 // pg_* covers pg_catalog, pg_toast, pg_temp_N, and pg_toast_temp_N.
 const LIST_SCHEMAS_SQL = `
@@ -141,6 +146,68 @@ export function mapPostgresError(error: unknown): SourceConnectionError {
   )
 }
 
+/** Catalog reads fail for their own reasons; connection-level failures keep the shared mapping. */
+export function mapDiscoveryError(error: unknown): SourceConnectionError {
+  switch (errorCode(error)) {
+    case "57014":
+      return new SourceConnectionError(
+        "timeout",
+        "Reading the source catalog took too long. Try again, or select fewer schemas.",
+      )
+    case "55P03":
+      return new SourceConnectionError(
+        "timeout",
+        "A table in the selected schemas stayed locked (for example by a running migration). Try again when it finishes.",
+      )
+    case "42501":
+      return new SourceConnectionError(
+        "unknown",
+        "The source user is not allowed to read the catalog for the selected schemas.",
+      )
+    default:
+      return mapPostgresError(error)
+  }
+}
+
+/**
+ * Runs `work` on `client`; aborting `signal` cancels whatever query the
+ * client's server process is running, so a slow read also stops on the source.
+ */
+async function withCancellation<T>(
+  client: ClientBase,
+  signal: AbortSignal,
+  cancelBackend: (pid: number) => Promise<void>,
+  work: () => Promise<T>,
+): Promise<T> {
+  const { rows } = await client.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")
+  const pid = rows[0]?.pid
+  const cancel = () => {
+    if (pid !== undefined) void cancelBackend(pid).catch(() => {})
+  }
+  signal.addEventListener("abort", cancel, { once: true })
+  try {
+    signal.throwIfAborted()
+    return await work()
+  } finally {
+    signal.removeEventListener("abort", cancel)
+  }
+}
+
+/** Sends the cancel from a separate short-lived session, so a busy pool cannot delay it. */
+async function cancelBackend(source: SavedSource<PostgresConfig>, pid: number): Promise<void> {
+  const client = new Client({
+    ...clientConfig(source.config, source.secret),
+    query_timeout: CANCEL_TIMEOUT_MS,
+  })
+  client.on("error", () => {})
+  try {
+    await client.connect()
+    await client.query("SELECT pg_cancel_backend($1)", [pid])
+  } finally {
+    await client.end().catch(() => {})
+  }
+}
+
 export function createPostgresAdapter(): SourceAdapter<PostgresConfig> {
   // Insertion order doubles as recency: entries are re-inserted on use.
   const pools = new Map<string, { version: string; pool: Pool }>()
@@ -215,6 +282,43 @@ export function createPostgresAdapter(): SourceAdapter<PostgresConfig> {
         return rows.map((row) => row.name)
       } catch (error) {
         throw mapPostgresError(error)
+      }
+    },
+
+    async discover(source, request) {
+      request.signal.throwIfAborted()
+      let client: PoolClient
+      try {
+        client = await poolFor(source).connect()
+      } catch (error) {
+        throw mapPostgresError(error)
+      }
+      let reusable = false
+      try {
+        const metadata = await withCancellation(
+          client,
+          request.signal,
+          (pid) => cancelBackend(source, pid),
+          async () => {
+            // One read-only snapshot, so objects, columns, and keys agree with each other.
+            await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            await client.query(`SET LOCAL lock_timeout = ${DISCOVERY_LOCK_TIMEOUT_MS}`)
+            const result = await readPostgresMetadata(client, request)
+            await client.query("COMMIT")
+            return result
+          },
+        )
+        // A cancel sent just as the work finished could still reach this session later.
+        request.signal.throwIfAborted()
+        reusable = true
+        return metadata
+      } catch (error) {
+        request.signal.throwIfAborted()
+        if (error instanceof DiscoveryLimitExceeded) throw error
+        throw mapDiscoveryError(error)
+      } finally {
+        // A failed or cancelled session may sit mid-transaction: discard it instead of reusing it.
+        client.release(!reusable)
       }
     },
 

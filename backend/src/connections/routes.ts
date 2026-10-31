@@ -19,12 +19,22 @@ import {
 } from "./schemas.js"
 import type { ConnectionsService } from "./service.js"
 
+/** A saved source whose readable contents may have changed (new, or other schemas or settings). */
+export interface SourceSavedEvent {
+  workspaceId: string
+  connectionId: string
+  userId: string
+  trigger: "source_created" | "source_changed"
+}
+
 export interface ConnectionsDeps {
   workspaces: WorkspacesRepository
   auth: AuthService
   sessionSecret: string
   /** Null when CONNECTION_ENCRYPTION_KEY is missing: routes answer 503. */
   connections: ConnectionsService | null
+  /** Runs after a save, before the response; it must not throw (e.g. starts metadata discovery). */
+  onSourceSaved?: (event: SourceSavedEvent) => Promise<void>
 }
 
 const workspaceParamsSchema = z.object({ workspaceId: z.uuid() })
@@ -95,7 +105,16 @@ export function connectionsRouter(deps: ConnectionsDeps | null): Router {
     validate("body", createConnectionSchema),
     asyncHandler(async (req, res) => {
       const input = req.body as CreateConnectionInput
-      ok(res, await service.create(currentWorkspace(req).id, currentUser(req).id, input), 201)
+      const workspaceId = currentWorkspace(req).id
+      const userId = currentUser(req).id
+      const connection = await service.create(workspaceId, userId, input)
+      await deps.onSourceSaved?.({
+        workspaceId,
+        connectionId: connection.id,
+        userId,
+        trigger: "source_created",
+      })
+      ok(res, connection, 201)
     }),
   )
 
@@ -118,7 +137,17 @@ export function connectionsRouter(deps: ConnectionsDeps | null): Router {
     validate("body", updateConnectionSchema),
     asyncHandler(async (req, res) => {
       const input = req.body as UpdateConnectionInput
-      ok(res, await service.update(currentWorkspace(req).id, connectionId(req.params), input))
+      const workspaceId = currentWorkspace(req).id
+      const connection = await service.update(workspaceId, connectionId(req.params), input)
+      if (input.schemas !== undefined || input.config !== undefined) {
+        await deps.onSourceSaved?.({
+          workspaceId,
+          connectionId: connection.id,
+          userId: currentUser(req).id,
+          trigger: "source_changed",
+        })
+      }
+      ok(res, connection)
     }),
   )
 

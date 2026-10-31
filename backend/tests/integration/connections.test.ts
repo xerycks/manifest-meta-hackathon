@@ -9,6 +9,7 @@ import { closeSourceAdapters, createSourceAdapters } from "../../src/connections
 import type { SourceAdapters, SourceTestResult } from "../../src/connections/adapters/types.js"
 import type { Connection } from "../../src/connections/repository.js"
 import type { PostgresConfig } from "../../src/connections/schemas.js"
+import { RefreshRunner } from "../../src/manifests/runner.js"
 import { createApp } from "../../src/server/app.js"
 import { createPool } from "../../src/shared/postgres/client.js"
 import { buildDemoSource } from "../../src/storage/demo-source-builder.js"
@@ -16,6 +17,7 @@ import { WorkspacesRepository, type Workspace } from "../../src/workspaces/repos
 import { captureConsole } from "./support/console.js"
 import { signIn, TestClient } from "./support/http.js"
 import { startApp, type RunningApp } from "./support/server.js"
+import { sourceSettings } from "./support/source.js"
 import { resetStorage } from "./support/storage.js"
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL
@@ -31,28 +33,10 @@ interface Failure {
   error: { code: string; message: string; details?: { reason?: string } }
 }
 
-/** Connection settings for the synthetic test source, taken from its URL. */
-function sourceSettings(url: string): { config: PostgresConfig; password: string } {
-  const parsed = new URL(url)
-  const sslMode = parsed.searchParams.get("sslmode")
-  return {
-    config: {
-      host: parsed.hostname.replace(/^\[|\]$/g, ""),
-      port: Number(parsed.port || 5432),
-      database: decodeURIComponent(parsed.pathname.slice(1)),
-      username: decodeURIComponent(parsed.username),
-      sslMode: sslMode === "require" || sslMode === "verify-full" ? sslMode : "disable",
-    },
-    // Trust-auth test servers ignore the password, so a distinctive one still proves it never leaks.
-    password: parsed.password
-      ? decodeURIComponent(parsed.password)
-      : `manifest-it-${randomBytes(12).toString("hex")}`,
-  }
-}
-
 let storage: Pool
 let sourcePool: Pool
 let sources: SourceAdapters
+let refreshes: RefreshRunner
 let running: RunningApp
 let consoleCapture: ReturnType<typeof captureConsole>
 let owner: TestClient
@@ -110,7 +94,9 @@ before(async () => {
 
   consoleCapture = captureConsole()
   sources = createSourceAdapters()
-  running = await startApp(createApp(env(true), { pool: storage, sources }))
+  // Saving a source starts metadata discovery in the background (covered by manifests.test.ts).
+  refreshes = new RefreshRunner()
+  running = await startApp(createApp(env(true), { pool: storage, sources, refreshes }))
 
   const ownerSession = await signIn(running.baseUrl, "owner@example.com", "Owner")
   owner = ownerSession.client
@@ -128,6 +114,7 @@ after(async () => {
   if (skip) return
   consoleCapture.restore()
   await running.close()
+  await refreshes.shutdown()
   await closeSourceAdapters(sources)
   await storage.end()
   await sourcePool.end()

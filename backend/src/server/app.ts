@@ -18,6 +18,10 @@ import { CredentialSealer } from "../connections/credentials.js"
 import { ConnectionsRepository } from "../connections/repository.js"
 import { connectionsRouter, type ConnectionsDeps } from "../connections/routes.js"
 import { ConnectionsService } from "../connections/service.js"
+import { ManifestsRepository } from "../manifests/repository.js"
+import { manifestsRouter, type ManifestsDeps } from "../manifests/routes.js"
+import { RefreshRunner } from "../manifests/runner.js"
+import { ManifestsService } from "../manifests/service.js"
 import { cors, errorHandler, notFoundHandler, requestId } from "../shared/http/middleware.js"
 import { ok } from "../shared/http/respond.js"
 import { WorkspacesRepository, WorkspaceSettingsRepository } from "../workspaces/repository.js"
@@ -36,6 +40,8 @@ export interface AppDeps {
   googleProvider?: GoogleProvider | null
   /** Source adapters (and their pools); pass them in to close them on shutdown. */
   sources?: SourceAdapters
+  /** Background manifest refreshes; pass it in to stop them on shutdown. */
+  refreshes?: RefreshRunner
 }
 
 export function createApp(env: Env, deps: AppDeps = {}): Express {
@@ -49,6 +55,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   let workspaceDeps: WorkspaceDeps | null = null
   let authDeps: AuthDeps | null = null
   let connectionsDeps: ConnectionsDeps | null = null
+  let manifestsDeps: ManifestsDeps | null = null
   if (pool) {
     const auth = new AuthService(new UsersRepository(pool), new SessionsRepository(pool))
     const workspaces = new WorkspacesRepository(pool)
@@ -76,18 +83,29 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
       sessionSecret,
       google,
     }
+    const connections = env.CONNECTION_ENCRYPTION_KEY
+      ? new ConnectionsService(
+          new ConnectionsRepository(pool),
+          new CredentialSealer(env.CONNECTION_ENCRYPTION_KEY),
+          deps.sources ?? createSourceAdapters(),
+        )
+      : null
+    const manifests = connections
+      ? new ManifestsService(
+          new ManifestsRepository(pool),
+          connections,
+          deps.refreshes ?? new RefreshRunner(),
+        )
+      : null
     connectionsDeps = {
       workspaces,
       auth,
       sessionSecret,
-      connections: env.CONNECTION_ENCRYPTION_KEY
-        ? new ConnectionsService(
-            new ConnectionsRepository(pool),
-            new CredentialSealer(env.CONNECTION_ENCRYPTION_KEY),
-            deps.sources ?? createSourceAdapters(),
-          )
-        : null,
+      connections,
+      // New sources and changed schema selections are discovered right away.
+      ...(manifests ? { onSourceSaved: manifests.refreshAfterSave.bind(manifests) } : {}),
     }
+    manifestsDeps = { workspaces, auth, sessionSecret, manifests }
   }
 
   app.disable("x-powered-by")
@@ -111,6 +129,7 @@ export function createApp(env: Env, deps: AppDeps = {}): Express {
   app.use("/api/v1", authRouter(env, authDeps))
   app.use("/api/v1", workspacesRouter(workspaceDeps))
   app.use("/api/v1", connectionsRouter(connectionsDeps))
+  app.use("/api/v1", manifestsRouter(manifestsDeps))
 
   app.use(notFoundHandler)
   app.use(errorHandler)

@@ -3,6 +3,9 @@ import { randomUUID } from "node:crypto"
 import { AppError } from "../shared/http/errors.js"
 import {
   SourceConnectionError,
+  type DiscoveredMetadata,
+  type DiscoveryRequest,
+  type SavedSource,
   type SourceAdapter,
   type SourceAdapters,
   type SourceSecret,
@@ -44,6 +47,11 @@ export function savedPasswordReusable(saved: PostgresConfig, next: PostgresConfi
     saved.username === next.username &&
     saved.sslMode === next.sslMode
   )
+}
+
+/** Settings changes bump updatedAt, which retires the source's pooled connections. */
+function savedSource(connection: Connection, secret: SourceSecret): SavedSource<PostgresConfig> {
+  return { id: connection.id, version: connection.updatedAt, config: connection.config, secret }
 }
 
 function assertSchemasAvailable(selected: string[], available: string[]): void {
@@ -173,18 +181,29 @@ export class ConnectionsService {
   async listSchemas(workspaceId: string, id: string): Promise<string[]> {
     const { connection, secret } = await this.resolve(workspaceId, id)
     try {
-      return await this.adapterFor(connection.engine).listSchemas({
-        id,
-        version: connection.updatedAt,
-        config: connection.config,
-        secret,
-      })
+      return await this.adapterFor(connection.engine).listSchemas(savedSource(connection, secret))
     } catch (error) {
       if (error instanceof SourceConnectionError) {
         throw AppError.sourceConnectionFailed(error.reason, error.message)
       }
       throw error
     }
+  }
+
+  /**
+   * Reads the metadata of the source's currently selected schemas through its
+   * pool. Source problems reject with SourceConnectionError or DiscoveryLimitExceeded.
+   */
+  async discoverMetadata(
+    workspaceId: string,
+    id: string,
+    options: Omit<DiscoveryRequest, "schemas">,
+  ): Promise<DiscoveredMetadata> {
+    const { connection, secret } = await this.resolve(workspaceId, id)
+    return this.adapterFor(connection.engine).discover(savedSource(connection, secret), {
+      ...options,
+      schemas: connection.schemas,
+    })
   }
 
   async remove(workspaceId: string, id: string): Promise<void> {

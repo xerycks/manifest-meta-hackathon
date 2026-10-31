@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { mapPostgresError } from "../../src/connections/adapters/postgres.js"
+import { mapDiscoveryError, mapPostgresError } from "../../src/connections/adapters/postgres.js"
 
 function driverError(message: string, code?: string): Error {
   return Object.assign(new Error(message), code ? { code } : {})
@@ -59,4 +59,20 @@ test("unknown failures get a generic message that never echoes driver text", () 
   assert.equal(mapped.reason, "unknown")
   assert.ok(!mapped.message.includes("hunter2"))
   assert.equal(mapPostgresError("not even an error").reason, "unknown")
+})
+
+test("catalog read failures get discovery-specific messages", () => {
+  const timeout = mapDiscoveryError(driverError("canceling statement due to statement timeout", "57014"))
+  assert.equal(timeout.reason, "timeout")
+  assert.match(timeout.message, /catalog took too long/)
+
+  const locked = mapDiscoveryError(driverError("canceling statement due to lock timeout", "55P03"))
+  assert.match(locked.message, /stayed locked/)
+
+  const denied = mapDiscoveryError(driverError("permission denied for schema shop", "42501"))
+  assert.match(denied.message, /not allowed to read the catalog/)
+  assert.ok(!denied.message.includes("shop"))
+
+  // Connection-level problems keep the shared mapping.
+  assert.equal(mapDiscoveryError(driverError("connect ECONNREFUSED", "ECONNREFUSED")).reason, "host_unreachable")
 })
