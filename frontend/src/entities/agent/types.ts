@@ -8,15 +8,41 @@ export const AGENT_LIMITS = {
   connectionsPerRun: 10,
   answerChars: 8_000,
   evidenceRows: 20,
+  answerReplyChars: 2_000,
 } as const
 
-/** Cycle 11 adds awaiting_input and cycle 12 interrupted. */
-export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled"
+/** Files a question may carry: a few small UTF-8 text files the model reads. */
+export const ATTACHMENT_LIMITS = {
+  perRun: 3,
+  bytes: 256 * 1024,
+  nameChars: 200,
+} as const
 
-export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running"]
+/** Accepted file types by extension. */
+export const ATTACHMENT_TYPES = {
+  csv: "text/csv",
+  tsv: "text/tab-separated-values",
+  txt: "text/plain",
+  md: "text/markdown",
+  json: "application/json",
+} as const
+
+export type AttachmentMediaType = (typeof ATTACHMENT_TYPES)[keyof typeof ATTACHMENT_TYPES]
+
+/** Cycle 12 adds interrupted. */
+export type RunStatus = "queued" | "running" | "awaiting_input" | "completed" | "failed" | "cancelled"
+
+export const ACTIVE_RUN_STATUSES: readonly RunStatus[] = ["queued", "running", "awaiting_input"]
 
 export type AgentToolName =
-  "list_sources" | "search_metadata" | "describe_object" | "read_knowledge" | "run_query" | "submit_answer"
+  | "list_sources"
+  | "search_metadata"
+  | "describe_object"
+  | "read_knowledge"
+  | "run_query"
+  | "read_attachment"
+  | "ask_user"
+  | "submit_answer"
 
 /** A query result an answer cites, with the first rows of its result. */
 export interface EvidenceItem {
@@ -44,9 +70,27 @@ export interface AgentAnswer {
 }
 
 export interface RunError {
-  /** AGENT_STEP_LIMIT, AGENT_TIMEOUT, AGENT_PROVIDER_ERROR, AGENT_REFUSED, AGENT_OUTPUT_LIMIT, AGENT_INTERRUPTED, INTERNAL_ERROR */
+  /** AGENT_STEP_LIMIT, AGENT_TIMEOUT, AGENT_INPUT_TIMEOUT, AGENT_PROVIDER_ERROR, AGENT_REFUSED, AGENT_OUTPUT_LIMIT, AGENT_INTERRUPTED, INTERNAL_ERROR */
   code: string
   message: string
+}
+
+/** A question the model asked the user; the run waits for the answer. */
+export interface Clarification {
+  id: string
+  question: string
+  /** Suggested answers; may be empty. */
+  options: string[]
+  /** False: the answer must be one of the options. */
+  allowFreeText: boolean
+}
+
+/** A file sent with a question, without its content. */
+export interface AttachmentSummary {
+  id: string
+  name: string
+  mediaType: AttachmentMediaType
+  sizeBytes: number
 }
 
 export interface TokenUsage {
@@ -70,6 +114,9 @@ export interface AgentRun {
   error: RunError | null
   usage: TokenUsage
   steps: number
+  /** What the run is waiting on while awaiting_input; null otherwise. */
+  clarification: Clarification | null
+  attachments: AttachmentSummary[]
   createdAt: string
   startedAt: string | null
   finishedAt: string | null
@@ -82,6 +129,10 @@ export interface RunEventData {
   /** Text the model streamed while working, in order. */
   "answer.delta": { text: string }
   "answer.completed": { answer: AgentAnswer }
+  /** The run waits for the user's answer (status awaiting_input). */
+  "clarification.requested": Clarification
+  /** The user answered; the run goes on. */
+  "clarification.answered": { id: string; answer: string }
   "run.failed": RunError
   "run.cancelled": Record<string, never>
 }
@@ -93,8 +144,26 @@ export type RunEvent = {
   [T in RunEventType]: { seq: number; type: T; data: RunEventData[T]; createdAt: string }
 }[RunEventType]
 
+/** Events after which a run's stream ends. */
+export const TERMINAL_EVENT_TYPES: readonly RunEventType[] = ["answer.completed", "run.failed", "run.cancelled"]
+
 export interface AgentRunWithEvents extends AgentRun {
   events: RunEvent[]
+}
+
+/** GET …/agent/conversations/:conversationId: the latest runs, oldest first; finished runs leave out answer.delta. */
+export interface ConversationWithRuns {
+  id: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  runs: AgentRunWithEvents[]
+}
+
+/** A file as sent with a question: its name and its bytes in base64. */
+export interface AttachmentInput {
+  name: string
+  content: string
 }
 
 /** POST /workspaces/:workspaceId/agent/runs → 202 AgentRun. */
@@ -102,4 +171,5 @@ export interface StartRunInput {
   question: string
   conversationId?: string
   connectionIds?: string[]
+  attachments?: AttachmentInput[]
 }

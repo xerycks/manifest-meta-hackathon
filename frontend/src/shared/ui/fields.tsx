@@ -3,7 +3,6 @@ import type {
   InputHTMLAttributes,
   LabelHTMLAttributes,
   SelectHTMLAttributes,
-  TextareaHTMLAttributes,
 } from "react"
 
 import { cn } from "../lib/cn.ts"
@@ -16,7 +15,8 @@ export function Input({ className, ...props }: ComponentProps<"input">) {
   return <input className={cn(fieldClass, className)} {...props} />
 }
 
-export function Textarea({ className, ...props }: TextareaHTMLAttributes<HTMLTextAreaElement>) {
+/** Accepts a ref like a plain textarea. */
+export function Textarea({ className, ...props }: ComponentProps<"textarea">) {
   return <textarea className={cn(fieldClass, "min-h-20 leading-6", className)} {...props} />
 }
 

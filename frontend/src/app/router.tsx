@@ -22,6 +22,11 @@ const NewSourcePage = lazy(() =>
 const EditSourcePage = lazy(() =>
   import("@/pages/sources/EditSourcePage.tsx").then((module) => ({ default: module.EditSourcePage })),
 )
+// The ask screen and query runs load when first opened.
+const AskPage = lazy(() => import("@/pages/ask/AskPage.tsx").then((module) => ({ default: module.AskPage })))
+const ExecutionPage = lazy(() =>
+  import("@/pages/sources/ExecutionPage.tsx").then((module) => ({ default: module.ExecutionPage })),
+)
 
 function Lazy({ children }: { children: ReactNode }) {
   return <Suspense fallback={<LoadingState label="Loading…" />}>{children}</Suspense>
@@ -64,19 +69,12 @@ export const router = createBrowserRouter([
         element: <GuardedOutlet />,
         children: [
           { index: true, element: <HomePage /> },
-          {
-            path: "ask",
-            element: (
-              <PlaceholderPage
-                title="Ask"
-                emptyTitle="No conversations yet"
-                description="Once a source is connected and documented, you can ask questions here and inspect the evidence behind each answer."
-              />
-            ),
-          },
+          { path: "ask", element: <Lazy><AskPage /></Lazy> },
+          { path: "ask/:conversationId", element: <Lazy><AskPage /></Lazy> },
           { path: "sources", element: <SourcesPage /> },
           { path: "sources/new", element: <Lazy><NewSourcePage /></Lazy> },
           { path: "sources/:connectionId", element: <Lazy><EditSourcePage /></Lazy> },
+          { path: "sources/:connectionId/queries/:executionId", element: <Lazy><ExecutionPage /></Lazy> },
           { path: "manifests", element: <ManifestsPage /> },
           { path: "manifests/knowledge", element: <KnowledgePage /> },
           { path: "manifests/knowledge/new", element: <NewKnowledgeEntryPage /> },

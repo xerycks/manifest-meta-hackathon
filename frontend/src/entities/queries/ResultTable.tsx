@@ -24,22 +24,41 @@ export function ResultTable({
   /** Names the table for assistive technology, e.g. "Query result". */
   label: string
 }) {
-  const [shown, setShown] = useState(PAGE_ROWS)
   const notice = truncationNotice(result)
-  const visible = result.rows.slice(0, shown)
 
   return (
     <div className="space-y-2">
       <p className="text-sm text-(--muted)">{describeResult(result, partial)}</p>
-      {notice && (
-        <p
-          role="note"
-          className="rounded-md border border-(--warning-border) bg-(--warning-surface) px-3 py-2 text-sm leading-6 text-(--warning)"
-        >
-          {notice}
-        </p>
-      )}
-      {result.columns.length === 0 ? (
+      {notice && <ResultNotice>{notice}</ResultNotice>}
+      <ResultRows columns={result.columns} rows={result.rows} label={label} />
+    </div>
+  )
+}
+
+/** Why a result is incomplete, shown above its rows. */
+export function ResultNotice({ children }: { children: string }) {
+  return (
+    <p
+      role="note"
+      className="rounded-md border border-(--warning-border) bg-(--warning-surface) px-3 py-2 text-sm leading-6 text-(--warning)"
+    >
+      {children}
+    </p>
+  )
+}
+
+/** The table of a result's rows, for callers that describe the result themselves. */
+export function ResultRows({
+  columns,
+  rows,
+  label,
+}: Pick<QueryResult, "columns" | "rows"> & { label: string }) {
+  const [shown, setShown] = useState(PAGE_ROWS)
+  const visible = rows.slice(0, shown)
+
+  return (
+    <>
+      {columns.length === 0 ? (
         <p className="text-sm text-(--muted)">The query returned no columns.</p>
       ) : (
         // Focusable so keyboard users can scroll it.
@@ -55,7 +74,7 @@ export function ResultTable({
                 <th scope="col" className="px-3 py-2 text-right font-medium">
                   <span className="sr-only">Row</span>#
                 </th>
-                {result.columns.map((column, index) => (
+                {columns.map((column, index) => (
                   <th
                     key={index}
                     scope="col"
@@ -74,7 +93,7 @@ export function ResultTable({
               {visible.map((row, rowIndex) => (
                 <tr key={rowIndex} className="border-t border-(--border) align-top">
                   <td className="px-3 py-1.5 text-right text-xs text-(--muted) tabular-nums">{rowIndex + 1}</td>
-                  {result.columns.map((column, index) => {
+                  {columns.map((column, index) => {
                     const cell = displayCell(row[index] ?? null, column)
                     return (
                       <td
@@ -100,18 +119,16 @@ export function ResultTable({
           </table>
         </div>
       )}
-      {result.rows.length === 0 && result.columns.length > 0 && (
-        <p className="text-sm text-(--muted)">No rows matched.</p>
-      )}
-      {result.rows.length > shown && (
+      {rows.length === 0 && columns.length > 0 && <p className="text-sm text-(--muted)">No rows matched.</p>}
+      {rows.length > shown && (
         <button
           type="button"
           onClick={() => setShown((count) => count + PAGE_ROWS * 5)}
           className="rounded-md text-sm font-medium text-(--accent) underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
         >
-          Show more rows ({(result.rows.length - shown).toLocaleString("en-US")} not shown yet)
+          Show more rows ({(rows.length - shown).toLocaleString("en-US")} not shown yet)
         </button>
       )}
-    </div>
+    </>
   )
 }
