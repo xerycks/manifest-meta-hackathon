@@ -13,6 +13,8 @@ import {
 
 interface VersionedEditorOptions<K extends string, R extends { version: number }, P> {
   initial: DraftFields<K>
+  /** What the form starts with when it differs from `initial`, e.g. a prefilled new record. */
+  draft?: DraftFields<K>
   version: number
   /** The editor's fields for a newer saved record, as reported by a rejected save. */
   fieldsOf: (record: R) => DraftFields<K>
@@ -43,7 +45,10 @@ export interface VersionedEditor<K extends string, R> {
 export function useVersionedEditor<K extends string, R extends { version: number }, P>(
   options: VersionedEditorOptions<K, R, P>,
 ): VersionedEditor<K, R> {
-  const [state, setState] = useState(() => startDraft(options.initial, options.version))
+  const [state, setState] = useState(() => ({
+    ...startDraft(options.initial, options.version),
+    draft: options.draft ?? options.initial,
+  }))
   const [newer, setNewer] = useState<R | null>(null)
   const [error, setError] = useState<unknown>(null)
   const [saving, setSaving] = useState(false)

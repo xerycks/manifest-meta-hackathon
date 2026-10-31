@@ -1,12 +1,27 @@
 import { Play, Square } from "lucide-react"
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from "react"
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react"
 
 import type { Connection } from "@/entities/connections/types.ts"
 import { useManifest } from "@/entities/manifests/api.ts"
 import { useCancelQuery, useQueryExecution, useRunQuery } from "@/entities/queries/api.ts"
 import { describeResult } from "@/entities/queries/cells.ts"
+import { CsvDownloadButton } from "@/entities/queries/CsvDownloadButton.tsx"
 import { ResultTable } from "@/entities/queries/ResultTable.tsx"
-import { QUERY_LIMITS, type ExecutionRecord, type ExecutionSummary } from "@/entities/queries/types.ts"
+import { describeOutcome, describeRunError, type OutcomeNotice } from "@/entities/queries/run-outcome.ts"
+import {
+  QUERY_LIMITS,
+  type ExecutionRecord,
+  type ExecutionSummary,
+  type ReadQuery,
+} from "@/entities/queries/types.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
 import { Button } from "@/shared/ui/button.tsx"
 import { Card, CardDescription, CardTitle } from "@/shared/ui/card.tsx"
@@ -24,7 +39,6 @@ import {
   type QueryDraftErrors,
 } from "./query-draft.ts"
 import { RecentRuns } from "./RecentRuns.tsx"
-import { describeOutcome, describeRunError, type OutcomeNotice } from "./run-outcome.ts"
 
 /** What the result area shows after a run: its record, or why the request failed. */
 type Shown =
@@ -96,7 +110,16 @@ function CollectionField({
  * the source with the same validation, limits, and records as every other
  * caller, and shows the rows or why there are none.
  */
-export function QueryConsole({ connection, workspaceId }: { connection: Connection; workspaceId: string }) {
+export function QueryConsole({
+  connection,
+  workspaceId,
+  saveAction,
+}: {
+  connection: Connection
+  workspaceId: string
+  /** E.g. "Save as query", given the query in the editor (or the shown run's) when it is used. */
+  saveAction?: (currentQuery: () => ReadQuery | null) => ReactNode
+}) {
   const ids = useId()
   const isSql = connection.engine === "postgres"
   const [draft, setDraft] = useState<QueryDraft>(() => emptyQueryDraft(connection.schemas))
@@ -173,6 +196,10 @@ export function QueryConsole({ connection, workspaceId }: { connection: Connecti
   }
 
   const record = openId ? (opened.data ?? null) : shown?.kind === "record" ? shown.record : null
+  const currentQuery = () => {
+    const built = buildQuery(draft, connection.engine)
+    return "query" in built ? built.query : (record?.query ?? null)
+  }
   const notice = record ? describeOutcome(record) : shown?.kind === "notice" ? shown.notice : null
   const running = runningId !== null
   const field = (name: keyof QueryDraft) => `${ids}-${name}`
@@ -343,6 +370,8 @@ export function QueryConsole({ connection, workspaceId }: { connection: Connecti
         </div>
       </form>
 
+      {saveAction && <div className="flex flex-wrap">{saveAction(currentQuery)}</div>}
+
       <section aria-labelledby={`${ids}-result`} className="space-y-3">
         <h3 id={`${ids}-result`} className="text-sm font-semibold">
           Result
@@ -367,6 +396,14 @@ export function QueryConsole({ connection, workspaceId }: { connection: Connecti
             <p role="status" className="sr-only">
               Query finished: {describeResult(record.result, record.partialResult)}
             </p>
+            <CsvDownloadButton
+              workspaceId={workspaceId}
+              connectionId={connection.id}
+              executionId={record.id}
+              name={`${connection.name} query`}
+              createdAt={record.createdAt}
+              partial={record.truncated || record.partialResult}
+            />
             <ResultTable
               key={record.id}
               result={record.result}

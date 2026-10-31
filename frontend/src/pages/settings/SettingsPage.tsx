@@ -27,6 +27,87 @@ function errorMessage(error: unknown): string {
   return "Request failed."
 }
 
+const DEFAULT_TIME_ZONE = "UTC"
+const TIME_ZONES = ["UTC", ...Intl.supportedValuesOf("timeZone").filter((zone) => zone !== "UTC")]
+
+function isTimeZone(name: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: name })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The IANA time zone relative dates resolve in (saved query parameters now, routines later). */
+function TimeZoneCard({ workspaceId, canManage }: { workspaceId: string; canManage: boolean }) {
+  const setting = useWorkspaceSetting(workspaceId, "timezone")
+  const save = useSetWorkspaceSetting(workspaceId, "timezone")
+  const stored = setting.isSuccess && typeof setting.data.value === "string" ? setting.data.value : null
+  const [draft, setDraft] = useState("")
+  const [problem, setProblem] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (setting.isSuccess || setting.isError) setDraft(stored ?? DEFAULT_TIME_ZONE)
+  }, [setting.isSuccess, setting.isError, stored])
+
+  const onSave = (event: FormEvent) => {
+    event.preventDefault()
+    const zone = draft.trim()
+    if (!isTimeZone(zone)) {
+      setProblem("Choose a time zone from the list, such as Europe/Berlin or America/New_York.")
+      return
+    }
+    setProblem(null)
+    save.mutate(zone)
+  }
+
+  return (
+    <Card>
+      <CardTitle>Time zone</CardTitle>
+      <CardDescription>
+        Relative dates in saved query parameters, such as “start of this month”, resolve in this time
+        zone when a query runs. {stored ? "" : "Until someone sets one, it is UTC."}
+      </CardDescription>
+      <form onSubmit={onSave} className="mt-4 space-y-3" noValidate>
+        <div className="max-w-sm space-y-1.5">
+          <Label htmlFor="workspace-time-zone">Time zone</Label>
+          <Input
+            id="workspace-time-zone"
+            list="workspace-time-zones"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            disabled={setting.isPending || !canManage}
+            autoComplete="off"
+            spellCheck={false}
+            aria-invalid={problem ? true : undefined}
+            aria-describedby={problem ? "workspace-time-zone-problem" : undefined}
+          />
+          <datalist id="workspace-time-zones">
+            {TIME_ZONES.map((zone) => (
+              <option key={zone} value={zone} />
+            ))}
+          </datalist>
+          {problem && (
+            <p id="workspace-time-zone-problem" className="text-xs font-medium text-(--danger)">
+              {problem}
+            </p>
+          )}
+        </div>
+        {save.isError && <ErrorState title="Could not save" message={errorMessage(save.error)} />}
+        {save.isSuccess && (
+          <p role="status" className="text-sm text-(--muted)">
+            Saved. Saved queries resolve their dates in {save.data.value as string} from now on.
+          </p>
+        )}
+        <Button type="submit" disabled={save.isPending || !canManage}>
+          {save.isPending ? "Saving…" : "Save time zone"}
+        </Button>
+      </form>
+    </Card>
+  )
+}
+
 export function SettingsPage() {
   const session = useWorkspaceSession()
   const workspace = session.workspace
@@ -150,6 +231,8 @@ export function SettingsPage() {
               </form>
             </Card>
           )}
+
+          {workspace && <TimeZoneCard key={workspace.id} workspaceId={workspace.id} canManage={canManage} />}
 
           <Card>
             <CardTitle>Create a workspace</CardTitle>

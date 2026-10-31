@@ -1,16 +1,35 @@
 import { ExternalLink } from "lucide-react"
-import { useId } from "react"
+import { useId, type ReactNode } from "react"
 import { Link } from "react-router-dom"
 
 import type { EvidenceItem } from "@/entities/agent/types.ts"
+import { CsvDownloadButton } from "@/entities/queries/CsvDownloadButton.tsx"
 import { queryKind, queryText } from "@/entities/queries/query-text.ts"
 import { ResultNotice, ResultRows } from "@/entities/queries/ResultTable.tsx"
+import { QUERY_LIMITS } from "@/entities/queries/types.ts"
 import { CopyButton } from "@/shared/ui/copy-button.tsx"
 
 const count = (value: number) => `${value.toLocaleString("en-US")} ${value === 1 ? "row" : "rows"}`
 
-/** An execution an answer cites: what it supports, the query as run, and its first rows. */
-export function EvidenceBlock({ item, sourceName }: { item: EvidenceItem; sourceName: string | null }) {
+/**
+ * An execution an answer cites: what it supports, the query as run, its first
+ * rows, and a CSV of its stored rows, plus any action the screen adds.
+ */
+export function EvidenceBlock({
+  workspaceId,
+  item,
+  sourceName,
+  createdAt,
+  action,
+}: {
+  workspaceId: string
+  item: EvidenceItem
+  sourceName: string | null
+  /** When the answer was given, for the downloaded file's name. */
+  createdAt: string
+  /** E.g. "Save as query". */
+  action?: ReactNode
+}) {
   const id = useId()
   const text = queryText(item.query)
   const shown =
@@ -58,6 +77,17 @@ export function EvidenceBlock({ item, sourceName }: { item: EvidenceItem; source
           </ResultNotice>
         )}
         <ResultRows columns={item.columns} rows={item.rows} label={`Rows behind “${item.label}”`} />
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <CsvDownloadButton
+          workspaceId={workspaceId}
+          connectionId={item.connectionId}
+          executionId={item.executionId}
+          name={item.label}
+          createdAt={createdAt}
+          partial={item.truncated || item.rowCount > QUERY_LIMITS.snapshotRows}
+        />
+        {action}
       </div>
     </section>
   )

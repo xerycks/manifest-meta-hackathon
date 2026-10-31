@@ -12,7 +12,7 @@ import { EmptyState, ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
 import { announcement, describeAskError, type Notice } from "./chat-text.ts"
 import { Composer } from "./Composer.tsx"
-import { RunTurn } from "./RunTurn.tsx"
+import { RunTurn, type EvidenceAction } from "./RunTurn.tsx"
 import { useChat, type Question } from "./use-chat.ts"
 
 const emptyQuestion = (): Question => ({ question: "", connectionIds: [], files: [] })
@@ -26,11 +26,14 @@ export function ChatPanel({
   workspaceId,
   conversationId,
   onConversationStarted,
+  evidenceAction,
 }: {
   workspaceId: string
   /** Null starts a new conversation with the first question. */
   conversationId: string | null
   onConversationStarted?: (conversationId: string) => void
+  /** An action for each piece of an answer's evidence, e.g. "Save as query". */
+  evidenceAction?: EvidenceAction
 }) {
   const chat = useChat({
     workspaceId,
@@ -173,7 +176,9 @@ export function ChatPanel({
           {runs.map((timeline) => (
             <RunTurn
               key={timeline.run.id}
+              workspaceId={workspaceId}
               timeline={timeline}
+              {...(evidenceAction ? { evidenceAction } : {})}
               sourceNames={sourceNames}
               onAnswer={reply}
               answering={chat.replying}

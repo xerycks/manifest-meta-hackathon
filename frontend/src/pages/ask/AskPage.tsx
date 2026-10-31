@@ -4,12 +4,28 @@ import { Link, useNavigate, useParams } from "react-router-dom"
 
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { ChatPanel } from "@/features/chat-panel/ChatPanel.tsx"
+import type { EvidenceAction } from "@/features/chat-panel/RunTurn.tsx"
 import { ConversationList } from "@/features/conversation-list/ConversationList.tsx"
+import { prefillFromEvidence } from "@/features/saved-query/saved-query-form.ts"
+import { SaveQueryButton } from "@/features/saved-query/SaveQueryButton.tsx"
 import { cn } from "@/shared/lib/cn.ts"
 import { Button, buttonVariants } from "@/shared/ui/button.tsx"
 import { LoadingState } from "@/shared/ui/states.tsx"
 
 const LIST_ID = "ask-conversations"
+
+/** Evidence from a source that still exists can become a saved query. */
+const saveEvidence =
+  (workspaceId: string): EvidenceAction =>
+  (item, { runId, sourceName }) =>
+    sourceName ? (
+      <SaveQueryButton
+        workspaceId={workspaceId}
+        engine={item.query.language === "sql" ? "postgres" : "mongodb"}
+        sourceName={sourceName}
+        prefill={() => prefillFromEvidence(item, runId)}
+      />
+    ) : null
 
 /**
  * Ask questions of the workspace's data; /ask starts a conversation,
@@ -77,6 +93,7 @@ export function AskPage() {
               workspaceId={session.workspaceId}
               conversationId={conversationId}
               onConversationStarted={(id) => navigate(`/ask/${id}`, { replace: true })}
+              evidenceAction={saveEvidence(session.workspaceId)}
             />
           </div>
         </div>

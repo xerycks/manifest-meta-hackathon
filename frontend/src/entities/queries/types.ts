@@ -23,6 +23,8 @@ export type ExecutionStatus =
 export interface SqlQuery {
   language: "sql"
   sql: string
+  /** Values bound to $1..$n by position (a saved query's parameters), never written into the SQL. */
+  params?: (string | number | boolean | null)[]
 }
 
 /** Values may use relaxed Extended JSON, such as {"$date": "…"} or {"$oid": "…"}. */
@@ -106,6 +108,10 @@ export interface ExecutionSummary {
   connectionId: string
   userId: string | null
   origin: QueryOrigin
+  /** The saved query this run belongs to, if any. */
+  savedQueryId: string | null
+  /** A saved query's parameter values as they resolved for this run, by name. */
+  parameters: Record<string, string | null> | null
   language: QueryLanguage
   query: ReadQuery
   limits: { maxRows: number; timeoutMs: number }

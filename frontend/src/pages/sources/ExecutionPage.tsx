@@ -4,10 +4,11 @@ import { Link, useParams } from "react-router-dom"
 import { useWorkspaceSession } from "@/app/workspace-session/WorkspaceSession.tsx"
 import { useConnection } from "@/entities/connections/api.ts"
 import { useQueryExecution } from "@/entities/queries/api.ts"
+import { CsvDownloadButton } from "@/entities/queries/CsvDownloadButton.tsx"
 import { queryKind, queryText } from "@/entities/queries/query-text.ts"
 import { ResultTable } from "@/entities/queries/ResultTable.tsx"
+import { describeOutcome, STATUS_LABELS } from "@/entities/queries/run-outcome.ts"
 import type { QueryOrigin } from "@/entities/queries/types.ts"
-import { describeOutcome, STATUS_LABELS } from "@/features/run-query/run-outcome.ts"
 import { ApiError } from "@/shared/api/client.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
 import { Badge } from "@/shared/ui/badge.tsx"
@@ -81,10 +82,32 @@ export function ExecutionPage() {
             <pre className="max-h-96 overflow-auto rounded-md bg-(--surface) p-3 font-mono text-xs leading-5 break-words whitespace-pre-wrap">
               <code>{queryText(record.query)}</code>
             </pre>
+            {record.query.language === "sql" && record.query.params && record.query.params.length > 0 && (
+              <p className="text-xs text-(--muted)">
+                Parameter values:{" "}
+                {record.query.params.map((value, index) => `$${index + 1} = ${JSON.stringify(value)}`).join(", ")}
+              </p>
+            )}
+            {record.parameters && Object.keys(record.parameters).length > 0 && (
+              <p className="text-xs text-(--muted)">
+                Ran with{" "}
+                {Object.entries(record.parameters)
+                  .map(([name, value]) => `${name} = ${value ?? "no value"}`)
+                  .join(", ")}
+              </p>
+            )}
             <p className="text-xs text-(--muted)">
               Limits: {record.limits.maxRows.toLocaleString("en-US")} rows, {record.limits.timeoutMs / 1000}{" "}
               seconds
             </p>
+            {record.savedQueryId && (
+              <Link
+                to={`/saved/${encodeURIComponent(record.savedQueryId)}`}
+                className="inline-block rounded-md text-xs font-medium text-(--accent) underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+              >
+                Open the saved query
+              </Link>
+            )}
           </Card>
           {outcome && <FailureNotice title={outcome.title} message={outcome.message} />}
           {record.status === "running" && (
@@ -94,9 +117,21 @@ export function ExecutionPage() {
           )}
           {record.result && (
             <section aria-labelledby="execution-result" className="space-y-2">
-              <h2 id="execution-result" className="text-sm font-semibold">
-                Result
-              </h2>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 id="execution-result" className="text-sm font-semibold">
+                  Result
+                </h2>
+                {session.workspaceId && (
+                  <CsvDownloadButton
+                    workspaceId={session.workspaceId}
+                    connectionId={record.connectionId}
+                    executionId={record.id}
+                    name={`${connection.data?.name ?? "query"} run`}
+                    createdAt={record.createdAt}
+                    partial={record.truncated || record.partialResult}
+                  />
+                )}
+              </div>
               <ResultTable
                 result={record.result}
                 partial={record.partialResult}

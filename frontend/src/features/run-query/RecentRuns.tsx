@@ -1,13 +1,13 @@
 import { useId } from "react"
 
 import { useQueryHistory } from "@/entities/queries/api.ts"
+import { STATUS_LABELS } from "@/entities/queries/run-outcome.ts"
 import type { ExecutionSummary } from "@/entities/queries/types.ts"
 import { formatRelativeTime } from "@/shared/lib/relative-time.ts"
 import { Badge } from "@/shared/ui/badge.tsx"
 import { Button } from "@/shared/ui/button.tsx"
 
 import { queryPreview } from "./query-draft.ts"
-import { STATUS_LABELS } from "./run-outcome.ts"
 
 function outcomeOf(run: ExecutionSummary): string {
   const parts: string[] = []

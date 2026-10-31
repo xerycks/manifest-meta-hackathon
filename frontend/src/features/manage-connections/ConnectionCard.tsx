@@ -159,8 +159,8 @@ export function ConnectionCard({
             Remove “{connection.name}”?
           </p>
           <p className="mt-1 text-sm leading-6 text-(--danger)">
-            Manifest deletes its saved settings and encrypted credentials. The database itself is not
-            changed.
+            Manifest deletes its saved settings, encrypted credentials, and the saved queries that read
+            it. The database itself is not changed.
           </p>
           {remove.isError && (
             <p role="alert" className="mt-2 text-sm font-medium text-(--danger)">

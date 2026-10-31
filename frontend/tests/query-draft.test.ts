@@ -9,7 +9,7 @@ import {
   parsePipeline,
   queryPreview,
 } from "../src/features/run-query/query-draft.ts"
-import { describeOutcome, describeRunError } from "../src/features/run-query/run-outcome.ts"
+import { describeOutcome, describeRunError } from "../src/entities/queries/run-outcome.ts"
 import { ApiError } from "../src/shared/api/client.ts"
 
 test("a SQL draft becomes a sql query with its row limit", () => {

@@ -1,5 +1,5 @@
-import type { ExecutionRecord, ExecutionStatus } from "../../entities/queries/types.ts"
 import { ApiError } from "../../shared/api/client.ts"
+import type { ExecutionRecord, ExecutionStatus } from "./types.ts"
 
 export const STATUS_LABELS: Record<
   ExecutionStatus,
@@ -57,6 +57,8 @@ export function describeRunError(error: unknown): OutcomeNotice {
         return { title: "Query not allowed", message: error.message }
       case "QUERY_BUSY":
         return { title: "Too many queries running", message: error.message }
+      case "INVALID_PARAMETERS":
+        return { title: "Check the parameters", message: error.message }
       case "VALIDATION_FAILED": {
         const messages = issueMessages(error.details)
         return { title: "Check the query", message: messages.length > 0 ? messages.join(" ") : error.message }

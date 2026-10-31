@@ -1,7 +1,18 @@
-import { Check, ChevronDown, CircleAlert, FileText, LoaderCircle, RefreshCw, RotateCcw } from "lucide-react"
-import { useId, useState } from "react"
+import {
+  Check,
+  ChevronDown,
+  CircleAlert,
+  Download,
+  FileText,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+} from "lucide-react"
+import { useId, useState, type ReactNode } from "react"
 
+import { answerExportUrl } from "@/entities/agent/api.ts"
 import { formatBytes } from "@/entities/agent/attachments.ts"
+import type { EvidenceItem } from "@/entities/agent/types.ts"
 import {
   isActive,
   pendingClarification,
@@ -101,21 +112,32 @@ function Progress({ items, active }: { items: TimelineItem[]; active: boolean })
   )
 }
 
+/** Renders an action for one piece of an answer's evidence. */
+export type EvidenceAction = (
+  item: EvidenceItem,
+  context: { runId: string; sourceName: string | null },
+) => ReactNode
+
 /**
  * One question and everything that answered it: progress, clarifications,
  * the answer with its evidence, or how it ended.
  */
 export function RunTurn({
+  workspaceId,
   timeline,
   sourceNames,
+  evidenceAction,
   onAnswer,
   answering,
   onRetry,
   retried,
   retrying,
 }: {
+  workspaceId: string
   timeline: RunTimeline
   sourceNames: Map<string, string>
+  /** An action for each piece of evidence, e.g. "Save as query". */
+  evidenceAction?: EvidenceAction
   onAnswer: (runId: string, answer: string) => Promise<void>
   answering: boolean
   /** Asks a failed question again, or retries an interrupted one. */
@@ -198,14 +220,28 @@ export function RunTurn({
               </div>
             )}
             <Markdown>{answer.markdown}</Markdown>
+            <a
+              href={answerExportUrl(workspaceId, run.id)}
+              download
+              className="inline-flex items-center gap-1 rounded-md text-xs font-medium text-(--accent) underline-offset-2 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+            >
+              <Download aria-hidden className="size-3.5" />
+              Download the answer (Markdown)
+            </a>
             {answer.evidence.length > 0 && (
               <div className="space-y-3">
                 <h3 className="text-sm font-semibold">Evidence</h3>
                 {answer.evidence.map((item) => (
                   <EvidenceBlock
                     key={item.executionId}
+                    workspaceId={workspaceId}
                     item={item}
                     sourceName={sourceNames.get(item.connectionId) ?? null}
+                    createdAt={run.finishedAt ?? run.createdAt}
+                    action={evidenceAction?.(item, {
+                      runId: run.id,
+                      sourceName: sourceNames.get(item.connectionId) ?? null,
+                    })}
                   />
                 ))}
               </div>

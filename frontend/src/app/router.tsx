@@ -22,10 +22,16 @@ const NewSourcePage = lazy(() =>
 const EditSourcePage = lazy(() =>
   import("@/pages/sources/EditSourcePage.tsx").then((module) => ({ default: module.EditSourcePage })),
 )
-// The ask screen and query runs load when first opened.
+// The ask screen, query runs, and saved queries load when first opened.
 const AskPage = lazy(() => import("@/pages/ask/AskPage.tsx").then((module) => ({ default: module.AskPage })))
 const ExecutionPage = lazy(() =>
   import("@/pages/sources/ExecutionPage.tsx").then((module) => ({ default: module.ExecutionPage })),
+)
+const SavedQueriesPage = lazy(() =>
+  import("@/pages/saved/SavedQueriesPage.tsx").then((module) => ({ default: module.SavedQueriesPage })),
+)
+const SavedQueryPage = lazy(() =>
+  import("@/pages/saved/SavedQueryPage.tsx").then((module) => ({ default: module.SavedQueryPage })),
 )
 
 function Lazy({ children }: { children: ReactNode }) {
@@ -81,16 +87,8 @@ export const router = createBrowserRouter([
           { path: "manifests/knowledge/:entryId", element: <KnowledgeEntryPage /> },
           { path: "manifests/:connectionId", element: <ManifestBrowserPage /> },
           { path: "manifests/:connectionId/objects/:objectId", element: <ManifestBrowserPage /> },
-          {
-            path: "saved",
-            element: (
-              <PlaceholderPage
-                title="Saved queries"
-                emptyTitle="No saved queries"
-                description="Turn a useful answer into a saved query you can reopen, rerun, and export."
-              />
-            ),
-          },
+          { path: "saved", element: <Lazy><SavedQueriesPage /></Lazy> },
+          { path: "saved/:savedQueryId", element: <Lazy><SavedQueryPage /></Lazy> },
           {
             path: "dashboards",
             element: (

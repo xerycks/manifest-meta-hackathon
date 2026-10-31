@@ -48,6 +48,11 @@ export function runEventsUrl(workspaceId: string, runId: string, after: number):
   return buildUrl(runPath(workspaceId, runId, `/events?after=${after}`))
 }
 
+/** Where an answer downloads as a Markdown file (its asker only). */
+export function answerExportUrl(workspaceId: string, runId: string): string {
+  return buildUrl(runPath(workspaceId, runId, "/export.md"))
+}
+
 /** A run with its events after `after`. */
 export function fetchRun(workspaceId: string, runId: string, after = 0): Promise<AgentRunWithEvents> {
   return apiRequest<AgentRunWithEvents>(runPath(workspaceId, runId, `?after=${after}`), { workspaceId })
