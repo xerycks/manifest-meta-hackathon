@@ -7,6 +7,7 @@ import { useConnection } from "@/entities/connections/api.ts"
 import { ConnectionCard } from "@/features/manage-connections/ConnectionCard.tsx"
 import { ConnectionForm } from "@/features/manage-connections/ConnectionForm.tsx"
 import { describeConnectionError } from "@/features/manage-connections/connection-form.ts"
+import { QueryConsole } from "@/features/run-query/QueryConsole.tsx"
 import { ApiError } from "@/shared/api/client.ts"
 import { EmptyState, ErrorState, LoadingState } from "@/shared/ui/states.tsx"
 
@@ -69,12 +70,19 @@ export function EditSourcePage() {
         </>
       )}
       {connection.isSuccess && session.workspaceId && canManage && (
-        <ConnectionForm
-          key={connection.data.id}
-          workspaceId={session.workspaceId}
-          connection={connection.data}
-          onSaved={(saved) => navigate("/sources", { state: { notice: `Saved “${saved.name}”.` } })}
-        />
+        <>
+          <ConnectionForm
+            key={connection.data.id}
+            workspaceId={session.workspaceId}
+            connection={connection.data}
+            onSaved={(saved) => navigate("/sources", { state: { notice: `Saved “${saved.name}”.` } })}
+          />
+          <QueryConsole
+            key={`console-${connection.data.id}`}
+            workspaceId={session.workspaceId}
+            connection={connection.data}
+          />
+        </>
       )}
     </div>
   )
